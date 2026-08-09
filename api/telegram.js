@@ -94,29 +94,56 @@ async function responderTablaLiga(chatId, nivel) {
 
   let listaEquipos = [];
   let ligaEncontrada = false;
+  const subcoleccionesPosibles = ['teams', 'equipos', 'standings', 'posiciones'];
 
   for (const docId of configLiga.ids) {
-    // 1. Intentar consultar la subcolección 'teams'
-    const teamsSnap = await db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data')
-      .collection('teams')
-      .get();
+    // 1. Probar subcolecciones dentro de artifacts -> docId -> public -> data -> [subcol]
+    for (const subcol of subcoleccionesPosibles) {
+      const snap = await db.collection('artifacts')
+        .doc(docId)
+        .collection('public')
+        .doc('data')
+        .collection(subcol)
+        .get();
 
-    if (!teamsSnap.empty) {
-      ligaEncontrada = true;
-      teamsSnap.forEach(doc => {
-        const d = doc.data();
-        listaEquipos.push({
-          equipo: d.nombre || d.equipo || d.name || doc.id,
-          puntos: d.puntos ?? d.pts ?? d.points ?? 0
+      if (!snap.empty) {
+        ligaEncontrada = true;
+        snap.forEach(doc => {
+          const d = doc.data();
+          listaEquipos.push({
+            equipo: d.nombre || d.equipo || d.name || d.team || d.teamName || doc.id,
+            puntos: d.puntos ?? d.pts ?? d.points ?? d.score ?? 0
+          });
         });
-      });
-      break;
+        break;
+      }
     }
 
-    // 2. Como fallback, consultar si existe un arreglo directo en 'data'
+    if (ligaEncontrada) break;
+
+    // 2. Probar subcolecciones directamente en artifacts -> docId -> [subcol]
+    for (const subcol of subcoleccionesPosibles) {
+      const snap = await db.collection('artifacts')
+        .doc(docId)
+        .collection(subcol)
+        .get();
+
+      if (!snap.empty) {
+        ligaEncontrada = true;
+        snap.forEach(doc => {
+          const d = doc.data();
+          listaEquipos.push({
+            equipo: d.nombre || d.equipo || d.name || d.team || d.teamName || doc.id,
+            puntos: d.puntos ?? d.pts ?? d.points ?? d.score ?? 0
+          });
+        });
+        break;
+      }
+    }
+
+    if (ligaEncontrada) break;
+
+    // 3. Probar documento en artifacts -> docId -> public -> data
     const dataDocSnap = await db.collection('artifacts')
       .doc(docId)
       .collection('public')
@@ -125,12 +152,27 @@ async function responderTablaLiga(chatId, nivel) {
 
     if (dataDocSnap.exists) {
       const datos = dataDocSnap.data();
-      const equipos = datos.tabla || datos.equipos || [];
-      if (equipos.length > 0) {
+      const equipos = datos.tabla || datos.equipos || datos.teams || datos.standings || [];
+      if (Array.isArray(equipos) && equipos.length > 0) {
         ligaEncontrada = true;
         listaEquipos = equipos.map(item => ({
-          equipo: item.equipo || item.nombre || item.name || 'Equipo',
-          puntos: item.puntos ?? item.pts ?? item.points ?? 0
+          equipo: item.equipo || item.nombre || item.name || item.team || 'Equipo',
+          puntos: item.puntos ?? item.pts ?? item.points ?? item.score ?? 0
+        }));
+        break;
+      }
+    }
+
+    // 4. Probar documento directo en artifacts -> docId
+    const rootDocSnap = await db.collection('artifacts').doc(docId).get();
+    if (rootDocSnap.exists) {
+      const datos = rootDocSnap.data();
+      const equipos = datos.tabla || datos.equipos || datos.teams || datos.standings || [];
+      if (Array.isArray(equipos) && equipos.length > 0) {
+        ligaEncontrada = true;
+        listaEquipos = equipos.map(item => ({
+          equipo: item.equipo || item.nombre || item.name || item.team || 'Equipo',
+          puntos: item.puntos ?? item.pts ?? item.points ?? item.score ?? 0
         }));
         break;
       }
