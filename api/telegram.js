@@ -29,31 +29,34 @@ module.exports = async (req, res) => {
     if (update.callback_query) {
       const callback = update.callback_query;
       const chatId = callback.message.chat.id;
-      const data = callback.data;
+      const data = callback.data; // Formato: "action_tipo_nivel_extra"
 
-      // Nivel seleccionado (ej: "nivel_primaria")
-      if (data.startsWith('nivel_')) {
-        const nivel = data.split('_')[1];
-        await enviarMenuTorneos(chatId, nivel, false);
-      }
-      // Mostrar historicos (ej: "historicos_primaria")
-      else if (data.startsWith('historicos_')) {
-        const nivel = data.split('_')[1];
-        await enviarMenuTorneos(chatId, nivel, true);
-      }
-      // Torneo seleccionado (ej: "torneo_primaria_IDTORNEO")
-      else if (data.startsWith('torneo_')) {
-        const parts = data.split('_');
-        const nivel = parts[1];
-        const tournamentId = parts.slice(2).join('_');
-        await enviarMenuCategorias(chatId, nivel, tournamentId);
-      }
-      // Liga/Categoría seleccionada (ej: "verliga_primaria_IDLIGA")
-      else if (data.startsWith('verliga_')) {
-        const parts = data.split('_');
-        const nivel = parts[1];
-        const leagueId = parts.slice(2).join('_');
-        await responderTablaEspecifica(chatId, nivel, leagueId);
+      if (data.startsWith('mod_')) {
+        const modo = data.split('_')[1]; // 'tabla' o 'anotadores'
+        await enviarMenuLigas(chatId, modo);
+      } else if (data.startsWith('nivel_')) {
+        const [, modo, nivel] = data.split('_');
+        await enviarMenuTorneos(chatId, modo, nivel, false);
+      } else if (data.startsWith('historicos_')) {
+        const [, modo, nivel] = data.split('_');
+        await enviarMenuTorneos(chatId, modo, nivel, true);
+      } else if (data.startsWith('torneo_')) {
+        const parts = data.split('_'); // ['torneo', modo, nivel, tournamentId...]
+        const modo = parts[1];
+        const nivel = parts[2];
+        const tournamentId = parts.slice(3).join('_');
+        await enviarMenuCategorias(chatId, modo, nivel, tournamentId);
+      } else if (data.startsWith('verliga_')) {
+        const parts = data.split('_'); // ['verliga', modo, nivel, leagueId...]
+        const modo = parts[1];
+        const nivel = parts[2];
+        const leagueId = parts.slice(3).join('_');
+
+        if (modo === 'anotadores') {
+          await responderAnotadoresEspecifica(chatId, nivel, leagueId);
+        } else {
+          await responderTablaEspecifica(chatId, nivel, leagueId);
+        }
       }
 
       return res.status(200).send('OK');
@@ -64,18 +67,22 @@ module.exports = async (req, res) => {
       const chatId = update.message.chat.id;
       const text = update.message.text.trim().toLowerCase();
 
-      if (text === '/tabla' || text === 'tabla' || text === '/start') {
-        await enviarMenuLigas(chatId);
+      if (text === '/start' || text === '/menu' || text === 'menu') {
+        await enviarMenuInicio(chatId);
+      } else if (text === '/tabla' || text === 'tabla' || text === 'clasificacion') {
+        await enviarMenuLigas(chatId, 'tabla');
+      } else if (text === '/anotadores' || text === 'anotadores' || text === '/goleadores' || text === 'goleadores') {
+        await enviarMenuLigas(chatId, 'anotadores');
       } else if (text === '/primaria' || text === 'primaria') {
-        await enviarMenuTorneos(chatId, 'primaria', false);
+        await enviarMenuTorneos(chatId, 'tabla', 'primaria', false);
       } else if (text === '/secundaria' || text === 'secundaria') {
-        await enviarMenuTorneos(chatId, 'secundaria', false);
+        await enviarMenuTorneos(chatId, 'tabla', 'secundaria', false);
       } else if (text === '/prepa' || text === 'prepa') {
-        await enviarMenuTorneos(chatId, 'prepa', false);
+        await enviarMenuTorneos(chatId, 'tabla', 'prepa', false);
       } else {
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: 'Selecciona una opción usando /tabla para ver los niveles disponibles.'
+          text: 'Selecciona una opción usando los comandos:\n🏆 /tabla - Ver Clasificación\n⚽ /anotadores - Ver Goleadores'
         });
       }
     }
@@ -87,24 +94,40 @@ module.exports = async (req, res) => {
   }
 };
 
-// Menú Nivel 1: Seleccionar Nivel (Primaria, Secundaria, Prepa)
-async function enviarMenuLigas(chatId) {
+// Menú Inicio: Elegir entre Clasificación y Anotadores
+async function enviarMenuInicio(chatId) {
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
-    text: '<b>🏆 SELECCIONA EL NIVEL A CONSULTAR:</b>',
+    text: '<b>⚽ BIENVENIDO AL BOT DE LIGAS ESCOLARES 🏆</b>\n\n¿Qué información deseas consultar?',
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '🏫 Primaria', callback_data: 'nivel_primaria' }],
-        [{ text: '🏫 Secundaria', callback_data: 'nivel_secundaria' }],
-        [{ text: '🏫 Prepa', callback_data: 'nivel_prepa' }]
+        [{ text: '🏆 Ver Clasificación / Posiciones', callback_data: 'mod_tabla' }],
+        [{ text: '⚽ Ver Tabla de Anotadores / Goleadores', callback_data: 'mod_anotadores' }]
+      ]
+    }
+  });
+}
+
+// Menú Nivel 1: Seleccionar Nivel (Primaria, Secundaria, Prepa)
+async function enviarMenuLigas(chatId, modo = 'tabla') {
+  const tituloModo = modo === 'anotadores' ? '⚽ ANOTADORES' : '🏆 CLASIFICACIÓN';
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: chatId,
+    text: `<b>${tituloModo} - SELECCIONA EL NIVEL:</b>`,
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '🏫 Primaria', callback_data: `nivel_${modo}_primaria` }],
+        [{ text: '🏫 Secundaria', callback_data: `nivel_${modo}_secundaria` }],
+        [{ text: '🏫 Prepa', callback_data: `nivel_${modo}_prepa` }]
       ]
     }
   });
 }
 
 // Menú Nivel 2: Seleccionar Campeonato / Torneo
-async function enviarMenuTorneos(chatId, nivel, mostrarHistoricos = false) {
+async function enviarMenuTorneos(chatId, modo, nivel, mostrarHistoricos = false) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
 
@@ -132,43 +155,39 @@ async function enviarMenuTorneos(chatId, nivel, mostrarHistoricos = false) {
     }
   }
 
-  // Ordenar por fecha de creación descendente (más reciente primero)
   torneos.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
 
   if (torneos.length === 0) {
-    // Si no se usaron torneos en este documento, pasamos directo a listar categorias
-    await enviarMenuCategorias(chatId, nivel, 'all');
+    await enviarMenuCategorias(chatId, modo, nivel, 'all');
     return;
   }
 
   const inline_keyboard = [];
 
   if (!mostrarHistoricos) {
-    // Mostrar el Torneo Actual (el primero de la lista ordenada)
     const actual = torneos[0];
     inline_keyboard.push([
-      { text: `⭐ ${actual.nombre}`, callback_data: `torneo_${nivel}_${actual.id}` }
+      { text: `⭐ ${actual.nombre}`, callback_data: `torneo_${modo}_${nivel}_${actual.id}` }
     ]);
 
-    // Si hay más de 1 torneo, mostrar opción para históricos
     if (torneos.length > 1) {
       inline_keyboard.push([
-        { text: '📜 Ver Campeonatos Anteriores / Históricos', callback_data: `historicos_${nivel}` }
+        { text: '📜 Ver Campeonatos Anteriores / Históricos', callback_data: `historicos_${modo}_${nivel}` }
       ]);
     }
   } else {
-    // Mostrar TODOS los torneos pasados y actuales
     torneos.forEach((t, idx) => {
       const tag = idx === 0 ? ' (Actual)' : ' (Histórico)';
       inline_keyboard.push([
-        { text: `🏆 ${t.nombre}${tag}`, callback_data: `torneo_${nivel}_${t.id}` }
+        { text: `🏆 ${t.nombre}${tag}`, callback_data: `torneo_${modo}_${nivel}_${t.id}` }
       ]);
     });
   }
 
+  const tituloModo = modo === 'anotadores' ? '⚽ ANOTADORES' : '🏆 CLASIFICACIÓN';
   const titulo = mostrarHistoricos
-    ? `<b>📜 CAMPEONATOS HISTÓRICOS - ${configLiga.nombre}:</b>`
-    : `<b>🏆 CAMPEONATO ACTUAL - ${configLiga.nombre}:</b>`;
+    ? `<b>📜 CAMPEONATOS HISTÓRICOS (${tituloModo}) - ${configLiga.nombre}:</b>`
+    : `<b>🏆 CAMPEONATO ACTUAL (${tituloModo}) - ${configLiga.nombre}:</b>`;
 
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
@@ -179,7 +198,7 @@ async function enviarMenuTorneos(chatId, nivel, mostrarHistoricos = false) {
 }
 
 // Menú Nivel 3: Seleccionar Liga / Categoría dentro de un Torneo
-async function enviarMenuCategorias(chatId, nivel, tournamentId) {
+async function enviarMenuCategorias(chatId, modo, nivel, tournamentId) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
 
@@ -196,7 +215,6 @@ async function enviarMenuCategorias(chatId, nivel, tournamentId) {
     if (!leaguesSnap.empty) {
       leaguesSnap.forEach(doc => {
         const d = doc.data();
-        // Filtrar por torneo si tournamentId no es 'all' y la liga especifica su tournamentId
         if (tournamentId === 'all' || !d.tournamentId || d.tournamentId === tournamentId) {
           listaCategorias.push({
             id: doc.id,
@@ -221,18 +239,21 @@ async function enviarMenuCategorias(chatId, nivel, tournamentId) {
   for (let i = 0; i < listaCategorias.length; i += 2) {
     const row = [];
     const cat1 = listaCategorias[i];
-    row.push({ text: `⚽ ${cat1.nombre}`, callback_data: `verliga_${nivel}_${cat1.id}` });
+    const icon = modo === 'anotadores' ? '⚽' : '🏆';
+    row.push({ text: `${icon} ${cat1.nombre}`, callback_data: `verliga_${modo}_${nivel}_${cat1.id}` });
 
     if (i + 1 < listaCategorias.length) {
       const cat2 = listaCategorias[i + 1];
-      row.push({ text: `⚽ ${cat2.nombre}`, callback_data: `verliga_${nivel}_${cat2.id}` });
+      row.push({ text: `${icon} ${cat2.nombre}`, callback_data: `verliga_${modo}_${nivel}_${cat2.id}` });
     }
     inline_keyboard.push(row);
   }
 
+  const tituloModo = modo === 'anotadores' ? '⚽ ANOTADORES' : '🏆 CLASIFICACIÓN';
+
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
-    text: `<b>📋 CATEGORÍAS / LIGAS DISPONIBLES - ${configLiga.nombre}:</b>\nSelecciona la categoría que deseas consultar:`,
+    text: `<b>📋 CATEGORÍAS (${tituloModo}) - ${configLiga.nombre}:</b>\nSelecciona la categoría a consultar:`,
     parse_mode: 'HTML',
     reply_markup: { inline_keyboard }
   });
@@ -247,28 +268,18 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
   let nombreLiga = 'LIGA';
 
   for (const docId of configLiga.ids) {
-    // 1. Obtener nombre de la liga
-    const leagueDoc = await db.collection('artifacts')
+    const dataRef = db.collection('artifacts')
       .doc(docId)
       .collection('public')
-      .doc('data')
-      .collection('leagues')
-      .doc(leagueId)
-      .get();
+      .doc('data');
 
+    const leagueDoc = await dataRef.collection('leagues').doc(leagueId).get();
     if (leagueDoc.exists) {
       const ld = leagueDoc.data();
       nombreLiga = ld.name || ld.nombre || ld.title || leagueId;
     }
 
-    // 2. Obtener los equipos de esa liga
-    const teamsSnap = await db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data')
-      .collection('teams')
-      .get();
-
+    const teamsSnap = await dataRef.collection('teams').get();
     if (!teamsSnap.empty) {
       teamsSnap.forEach(doc => {
         const d = doc.data();
@@ -289,14 +300,7 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
       });
     }
 
-    // 3. Obtener los partidos de esa liga para calcular puntos a partir de scoreHome y scoreAway
-    const matchesSnap = await db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data')
-      .collection('matches')
-      .get();
-
+    const matchesSnap = await dataRef.collection('matches').get();
     if (!matchesSnap.empty) {
       matchesSnap.forEach(doc => {
         const m = doc.data();
@@ -349,7 +353,6 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
     return;
   }
 
-  // Calcular diferencia de goles y ordenar (Puntos desc, DG desc, GF desc)
   listaEquipos.forEach(item => {
     item.dg = item.gf - item.gc;
   });
@@ -372,6 +375,112 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
     const pj = String(item.pj).padStart(2, ' ');
     const pts = String(item.puntos).padStart(4, ' ');
     mensaje += `${pos}. ${equipo}${pj}${pts}\n`;
+  });
+  mensaje += '</pre>';
+
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: chatId,
+    text: mensaje,
+    parse_mode: 'HTML'
+  });
+}
+
+// Responde con la tabla de goleadores/anotadores para una Liga/Categoría específica
+async function responderAnotadoresEspecifica(chatId, nivel, leagueId) {
+  const configLiga = LIGAS[nivel];
+  if (!configLiga) return;
+
+  let nombreLiga = 'LIGA';
+  let playersMap = {};
+  let teamsMap = {};
+  let goleadoresMap = {};
+
+  for (const docId of configLiga.ids) {
+    const dataRef = db.collection('artifacts')
+      .doc(docId)
+      .collection('public')
+      .doc('data');
+
+    const leagueDoc = await dataRef.collection('leagues').doc(leagueId).get();
+    if (leagueDoc.exists) {
+      const ld = leagueDoc.data();
+      nombreLiga = ld.name || ld.nombre || ld.title || leagueId;
+    }
+
+    const teamsSnap = await dataRef.collection('teams').get();
+    if (!teamsSnap.empty) {
+      teamsSnap.forEach(doc => {
+        const d = doc.data();
+        teamsMap[doc.id] = d.name || d.nombre || d.equipo || doc.id;
+      });
+    }
+
+    const playersSnap = await dataRef.collection('players').get();
+    if (!playersSnap.empty) {
+      playersSnap.forEach(doc => {
+        const d = doc.data();
+        playersMap[doc.id] = {
+          name: d.name || d.nombre || doc.id,
+          teamId: d.teamId || ''
+        };
+      });
+    }
+
+    const matchesSnap = await dataRef.collection('matches').get();
+    if (!matchesSnap.empty) {
+      matchesSnap.forEach(doc => {
+        const m = doc.data();
+        if (m.leagueId === leagueId && Array.isArray(m.scorers)) {
+          m.scorers.forEach(item => {
+            if (!item || !item.playerId) return;
+            const pId = item.playerId;
+            const tId = item.teamId || (playersMap[pId] ? playersMap[pId].teamId : '');
+            const golesCount = Number(item.count || item.goals || 1);
+
+            const playerName = playersMap[pId] ? playersMap[pId].name : 'Jugador';
+            const teamName = teamsMap[tId] || 'Equipo';
+
+            if (!goleadoresMap[pId]) {
+              goleadoresMap[pId] = {
+                name: playerName,
+                teamName: teamName,
+                goles: 0
+              };
+            }
+            goleadoresMap[pId].goles += golesCount;
+          });
+        }
+      });
+    }
+
+    if (Object.keys(goleadoresMap).length > 0) break;
+  }
+
+  const listaGoleadores = Object.values(goleadoresMap);
+
+  if (listaGoleadores.length === 0) {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text: `⚠️ No hay goles registrados aún para la categoría <b>${nombreLiga}</b>.`,
+      parse_mode: 'HTML'
+    });
+    return;
+  }
+
+  listaGoleadores.sort((a, b) => b.goles - a.goles);
+
+  let mensaje = `<b>⚽ TABLA DE ANOTADORES - ${configLiga.nombre}</b>\n`;
+  mensaje += `📌 <b>Categoría:</b> ${nombreLiga}\n\n`;
+  mensaje += '<pre>';
+  mensaje += 'Pos Jugador       Equipo      Goles\n';
+  mensaje += '-----------------------------------\n';
+
+  listaGoleadores.slice(0, 15).forEach((item, index) => {
+    const pos = String(index + 1).padEnd(2, ' ');
+    const jugador = String(item.name).substring(0, 12).padEnd(13, ' ');
+    const equipo = String(item.teamName).substring(0, 10).padEnd(11, ' ');
+    const goles = String(item.goles).padStart(5, ' ');
+    mensaje += `${pos}. ${jugador}${equipo}${goles}\n`;
   });
   mensaje += '</pre>';
 
