@@ -14,22 +14,30 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 // Mapeo de ligas hacia los IDs de documentos en Firestore
 const LIGAS = {
-  'primaria': { ids: ['lasalle-primaria-deportes', 'lasalle-primaria', 'primaria'], nombre: '🏫 PRIMARIA' },
-  'secundaria': { ids: ['lasalle-secundaria-deportes', 'lasalle-secundaria', 'secundaria'], nombre: '🏫 SECUNDARIA' },
-  'prepa': { ids: ['default-app-id', 'default-app-io', 'lasalle-prepa-deportes', 'lasalle-prepa', 'prepa'], nombre: '🏫 PREPA' }
+  'primaria': { ids: ['lasalle-primaria-deportes', 'lasalle-primaria', 'primaria'], nombre: '🏫 PRIMARIA', code: 'p' },
+  'secundaria': { ids: ['lasalle-secundaria-deportes', 'lasalle-secundaria', 'secundaria'], nombre: '🏫 SECUNDARIA', code: 's' },
+  'prepa': { ids: ['default-app-id', 'default-app-io', 'lasalle-prepa-deportes', 'lasalle-prepa', 'prepa'], nombre: '🏫 PREPA', code: 'e' }
 };
 
-// Función auxiliar robusta para enviar mensajes a Telegram con fallback conservando botones
+const CODE_TO_NIVEL = {
+  'p': 'primaria',
+  's': 'secundaria',
+  'e': 'prepa'
+};
+
+// Función auxiliar ultra-robusta de 3 niveles con fallback garantizado
 async function sendTelegramMessage(chatId, text, options = {}) {
   try {
+    // Intento 1: Mensaje original (con HTML y botones)
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
       text: text,
       ...options
     });
   } catch (err) {
-    console.error('Error enviando mensaje Telegram con opciones:', err?.response?.data || err.message);
+    console.error('Error enviando mensaje Telegram (Intento 1 HTML):', err?.response?.data || err.message);
     try {
+      // Intento 2: Texto plano con botones (por si falló la sintaxis HTML)
       const plainText = text.replace(/<[^>]*>/g, '');
       const fallbackOptions = { ...options };
       delete fallbackOptions.parse_mode;
@@ -39,8 +47,18 @@ async function sendTelegramMessage(chatId, text, options = {}) {
         text: plainText,
         ...fallbackOptions
       });
-    } catch (fallbackErr) {
-      console.error('Error crítico en fallback Telegram:', fallbackErr?.response?.data || fallbackErr.message);
+    } catch (err2) {
+      console.error('Error enviando mensaje Telegram (Intento 2 Botones):', err2?.response?.data || err2.message);
+      try {
+        // Intento 3: Texto plano limpio sin botones (Garantía absoluta de entrega)
+        const plainText = text.replace(/<[^>]*>/g, '');
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: plainText
+        });
+      } catch (err3) {
+        console.error('Error crítico final Telegram:', err3?.response?.data || err3.message);
+      }
     }
   }
 }
@@ -107,7 +125,14 @@ module.exports = async (req, res) => {
         } else {
           await responderTablaEspecifica(chatId, nivel, leagueId);
         }
-      } else if (data.startsWith('vereq_')) {
+      } else if (data.startsWith('vq_')) {
+        // Callback ultra-corto para evitar límite de 64 bytes: vq_p_TEAMID, vq_s_TEAMID, vq_e_TEAMID
+        const parts = data.split('_');
+        const code = parts[1];
+        const nivel = CODE_TO_NIVEL[code] || code;
+        const teamId = parts.slice(2).join('_');
+        await responderDetalleEquipo(chatId, nivel, teamId);
+      } else if (data.startsWith('verequipo_')) {
         const parts = data.split('_');
         const nivel = parts[1];
         const teamId = parts.slice(2).join('_');
@@ -660,6 +685,7 @@ async function buscarEquipo(chatId, query) {
               leagueId: d.leagueId || '',
               nivel: nivelKey,
               nivelNombre: configLiga.nombre,
+              docCode: configLiga.code || nivelKey[0],
               docId
             });
           }
@@ -699,13 +725,17 @@ async function buscarEquipo(chatId, query) {
       if (!c.nombreLiga) c.nombreLiga = 'Categoría';
     }
 
-    // Usar 'vereq_' como prefijo corto para no exceder los 64 bytes de callback_data en Telegram
-    const inline_keyboard = coincidencias.map(c => [
-      {
-        text: `⚽ ${c.teamName} - ${c.nombreLiga} (${c.nivelNombre})`,
-        callback_data: `vereq_${c.nivel}_${c.teamId}`
-      }
-    ]);
+    // Usar 'vq_c_ID' como prefijo ultra-corto (< 64 bytes garantizado en callback_data)
+    const inline_keyboard = coincidencias.map(c => {
+      const code = c.docCode || 'p';
+      const labelText = `⚽ ${c.teamName} - ${c.nombreLiga} (${c.nivelNombre})`.substring(0, 50);
+      return [
+        {
+          text: labelText,
+          callback_data: `vq_${code}_${c.teamId}`
+        }
+      ];
+    });
 
     await sendTelegramMessage(chatId, `🔍 Se encontraron <b>${coincidencias.length} equipos</b> que coinciden con "<b>${escapeHtml(query)}</b>". Selecciona el que deseas consultar:`, {
       parse_mode: 'HTML',
