@@ -14,9 +14,9 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 // Mapeo de ligas hacia los IDs de documentos en Firestore
 const LIGAS = {
-  'primaria': { id: 'lasalle-primaria-deportes', nombre: '🏫 PRIMARIA' },
-  'secundaria': { id: 'lasalle-secundaria-deportes', nombre: '🏫 SECUNDARIA' },
-  'prepa': { id: 'lasalle-prepa-deportes', nombre: '🏫 PREPA' } // Ajusta el ID según lo tengas guardado
+  'primaria': { ids: ['lasalle-primaria-deportes', 'lasalle-primaria', 'primaria'], nombre: '🏫 PRIMARIA' },
+  'secundaria': { ids: ['lasalle-secundaria-deportes', 'lasalle-secundaria', 'secundaria'], nombre: '🏫 SECUNDARIA' },
+  'prepa': { ids: ['lasalle-prepa-deportes', 'lasalle-prepa', 'prepa'], nombre: '🏫 PREPA' }
 };
 
 module.exports = async (req, res) => {
@@ -29,7 +29,7 @@ module.exports = async (req, res) => {
     if (update.callback_query) {
       const callback = update.callback_query;
       const chatId = callback.message.chat.id;
-      const data = callback.data; // Formato esperado: "tabla_secundaria" o "tabla_primaria"
+      const data = callback.data;
 
       if (data.startsWith('tabla_')) {
         const nivel = data.split('_')[1];
@@ -45,7 +45,6 @@ module.exports = async (req, res) => {
       const text = update.message.text.trim().toLowerCase();
 
       if (text === '/tabla' || text === 'tabla' || text === '/start') {
-        // Enviar menú con botones para elegir la liga
         await enviarMenuLigas(chatId);
       } else if (text === '/primaria' || text === 'primaria') {
         await responderTablaLiga(chatId, 'primaria');
@@ -68,7 +67,6 @@ module.exports = async (req, res) => {
   }
 };
 
-// Función para enviar botones interactivos
 async function enviarMenuLigas(chatId) {
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
@@ -84,7 +82,6 @@ async function enviarMenuLigas(chatId) {
   });
 }
 
-// Función para leer la subcolección y enviar la tabla
 async function responderTablaLiga(chatId, nivel) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) {
@@ -95,30 +92,55 @@ async function responderTablaLiga(chatId, nivel) {
     return;
   }
 
-  // Consulta la ruta específica: artifacts -> ID_LIGA -> public -> data
-  const docRef = db.collection('artifacts')
-    .doc(configLiga.id)
-    .collection('public')
-    .doc('data');
+  let listaEquipos = [];
+  let ligaEncontrada = false;
 
-  const docSnap = await docRef.get();
+  for (const docId of configLiga.ids) {
+    // 1. Intentar consultar la subcolección 'teams'
+    const teamsSnap = await db.collection('artifacts')
+      .doc(docId)
+      .collection('public')
+      .doc('data')
+      .collection('teams')
+      .get();
 
-  if (!docSnap.exists) {
+    if (!teamsSnap.empty) {
+      ligaEncontrada = true;
+      teamsSnap.forEach(doc => {
+        const d = doc.data();
+        listaEquipos.push({
+          equipo: d.nombre || d.equipo || d.name || doc.id,
+          puntos: d.puntos ?? d.pts ?? d.points ?? 0
+        });
+      });
+      break;
+    }
+
+    // 2. Como fallback, consultar si existe un arreglo directo en 'data'
+    const dataDocSnap = await db.collection('artifacts')
+      .doc(docId)
+      .collection('public')
+      .doc('data')
+      .get();
+
+    if (dataDocSnap.exists) {
+      const datos = dataDocSnap.data();
+      const equipos = datos.tabla || datos.equipos || [];
+      if (equipos.length > 0) {
+        ligaEncontrada = true;
+        listaEquipos = equipos.map(item => ({
+          equipo: item.equipo || item.nombre || item.name || 'Equipo',
+          puntos: item.puntos ?? item.pts ?? item.points ?? 0
+        }));
+        break;
+      }
+    }
+  }
+
+  if (!ligaEncontrada || listaEquipos.length === 0) {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
       text: `⚠️ No se encontraron datos guardados para ${configLiga.nombre}.`
-    });
-    return;
-  }
-
-  const datos = docSnap.data();
-  // Ajusta 'tabla' o 'equipos' según la propiedad dentro de 'data'
-  const listaEquipos = datos.tabla || datos.equipos || [];
-
-  if (listaEquipos.length === 0) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: `⚠️ La tabla de ${configLiga.nombre} está vacía.`
     });
     return;
   }
@@ -133,8 +155,8 @@ async function responderTablaLiga(chatId, nivel) {
 
   listaEquipos.forEach((item, index) => {
     const pos = String(index + 1).padEnd(2, ' ');
-    const equipo = (item.equipo || item.nombre || 'Equipo').substring(0, 10).padEnd(11, ' ');
-    const pts = String(item.puntos || item.pts || 0).padStart(3, ' ');
+    const equipo = String(item.equipo).substring(0, 10).padEnd(11, ' ');
+    const pts = String(item.puntos).padStart(3, ' ');
     mensaje += `${pos}. ${equipo}${pts}\n`;
   });
   mensaje += '</pre>';
