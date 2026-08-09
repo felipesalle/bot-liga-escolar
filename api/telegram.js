@@ -19,7 +19,7 @@ const LIGAS = {
   'prepa': { ids: ['default-app-id', 'default-app-io', 'lasalle-prepa-deportes', 'lasalle-prepa', 'prepa'], nombre: '🏫 PREPA' }
 };
 
-// Función auxiliar robusta para enviar mensajes a Telegram con fallback automático
+// Función auxiliar robusta para enviar mensajes a Telegram con fallback conservando botones
 async function sendTelegramMessage(chatId, text, options = {}) {
   try {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -30,11 +30,15 @@ async function sendTelegramMessage(chatId, text, options = {}) {
   } catch (err) {
     console.error('Error enviando mensaje Telegram con opciones:', err?.response?.data || err.message);
     try {
-      // Si falla por formato HTML o sintaxis, enviar como texto plano sin formato
+      // Si falla el parseo HTML, remover solo parse_mode para mantener los botones (reply_markup)
       const plainText = text.replace(/<[^>]*>/g, '');
+      const fallbackOptions = { ...options };
+      delete fallbackOptions.parse_mode;
+
       await axios.post(`${TELEGRAM_API}/sendMessage`, {
         chat_id: chatId,
-        text: plainText
+        text: plainText,
+        ...fallbackOptions
       });
     } catch (fallbackErr) {
       console.error('Error crítico en fallback Telegram:', fallbackErr?.response?.data || fallbackErr.message);
@@ -48,6 +52,16 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function getSportEmoji(deporte) {
+  if (!deporte) return '🏅';
+  const dep = deporte.toLowerCase();
+  if (dep.includes('fút') || dep.includes('fut') || dep.includes('socc')) return '⚽';
+  if (dep.includes('básq') || dep.includes('basq') || dep.includes('basket')) return '🏀';
+  if (dep.includes('volei') || dep.includes('volli') || dep.includes('voley')) return '🏐';
+  if (dep.includes('béis') || dep.includes('beis')) return '⚾';
+  return '🏅';
 }
 
 module.exports = async (req, res) => {
@@ -94,8 +108,8 @@ module.exports = async (req, res) => {
         } else {
           await responderTablaEspecifica(chatId, nivel, leagueId);
         }
-      } else if (data.startsWith('verequipo_')) {
-        const parts = data.split('_');
+      } else if (data.startsWith('vereq_')) {
+        const parts = data.split('_'); // ['vereq', nivel, teamId...]
         const nivel = parts[1];
         const teamId = parts.slice(2).join('_');
         await responderDetalleEquipo(chatId, nivel, teamId);
@@ -686,10 +700,11 @@ async function buscarEquipo(chatId, query) {
       if (!c.nombreLiga) c.nombreLiga = 'Categoría';
     }
 
+    // Usar 'vereq_' como prefijo corto para no exceder los 64 bytes de callback_data en Telegram
     const inline_keyboard = coincidencias.map(c => [
       {
         text: `⚽ ${c.teamName} - ${c.nombreLiga} (${c.nivelNombre})`,
-        callback_data: `verequipo_${c.nivel}_${c.teamId}`
+        callback_data: `vereq_${c.nivel}_${c.teamId}`
       }
     ]);
 
@@ -700,13 +715,14 @@ async function buscarEquipo(chatId, query) {
   }
 }
 
-// Genera la tarjeta con la ficha del equipo
+// Genera la tarjeta con la ficha del equipo (con Deporte, Posición, Último Partido y Próximo Partido)
 async function responderDetalleEquipo(chatId, nivel, teamId) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
 
   let teamObj = null;
   let nombreLiga = 'LIGA';
+  let deporteLiga = '';
   let teamsMap = {};
   let partidosEquipo = [];
 
@@ -716,6 +732,7 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
       .collection('public')
       .doc('data');
 
+    // 1. Obtener equipos
     const teamsSnap = await dataRef.collection('teams').get();
     if (!teamsSnap.empty) {
       teamsSnap.forEach(doc => {
@@ -730,14 +747,26 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
 
     if (!teamObj) continue;
 
+    // 2. Obtener nombre y deporte de la liga / torneo
     if (teamObj.leagueId) {
       const leagueDoc = await dataRef.collection('leagues').doc(teamObj.leagueId).get();
       if (leagueDoc.exists) {
         const ld = leagueDoc.data();
         nombreLiga = ld.name || ld.nombre || ld.title || teamObj.leagueId;
+        deporteLiga = ld.sport || ld.deporte || '';
+
+        // Si la liga no tiene deporte explícito, buscarlo en su torneo
+        if (!deporteLiga && ld.tournamentId) {
+          const tDoc = await dataRef.collection('tournaments').doc(ld.tournamentId).get();
+          if (tDoc.exists) {
+            const tData = tDoc.data();
+            deporteLiga = tData.sport || tData.deporte || '';
+          }
+        }
       }
     }
 
+    // 3. Obtener partidos del equipo
     const matchesSnap = await dataRef.collection('matches').get();
     if (!matchesSnap.empty) {
       matchesSnap.forEach(doc => {
@@ -806,9 +835,14 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
   });
 
   const dg = gf - gc;
+  const sportEmoji = getSportEmoji(deporteLiga);
 
   let mensaje = `<b>⚽ FICHA DE EQUIPO - ${escapeHtml(teamObj.name)}</b>\n`;
-  mensaje += `📌 <b>Categoría:</b> ${escapeHtml(nombreLiga)} (${configLiga.nombre})\n\n`;
+  mensaje += `📌 <b>Categoría:</b> ${escapeHtml(nombreLiga)} (${configLiga.nombre})\n`;
+  if (deporteLiga) {
+    mensaje += `${sportEmoji} <b>Deporte:</b> ${escapeHtml(deporteLiga)}\n`;
+  }
+  mensaje += `\n`;
 
   mensaje += `📊 <b>Estadísticas:</b>\n`;
   mensaje += ` • <b>Puntos:</b> ${puntos} Pts (en ${pj} PJ)\n`;
