@@ -628,34 +628,48 @@ async function responderPartidosEspecifica(chatId, nivel, leagueId) {
   });
 }
 
-// Búsqueda rápida por nombre de equipo
+// Búsqueda rápida por nombre de equipo (soporta múltiples coincidencias en distintas ligas y niveles)
 async function buscarEquipo(chatId, query) {
   const queryLower = query.toLowerCase().trim();
   let coincidencias = [];
 
   for (const [nivelKey, configLiga] of Object.entries(LIGAS)) {
     for (const docId of configLiga.ids) {
-      const teamsSnap = await db.collection('artifacts')
+      const dataRef = db.collection('artifacts')
         .doc(docId)
         .collection('public')
-        .doc('data')
-        .collection('teams')
-        .get();
+        .doc('data');
+
+      const teamsSnap = await dataRef.collection('teams').get();
 
       if (!teamsSnap.empty) {
+        let leaguesMap = {};
+        const leaguesSnap = await dataRef.collection('leagues').get();
+        if (!leaguesSnap.empty) {
+          leaguesSnap.forEach(lDoc => {
+            const lData = lDoc.data();
+            leaguesMap[lDoc.id] = lData.name || lData.nombre || lData.title || lDoc.id;
+          });
+        }
+
         teamsSnap.forEach(doc => {
           const d = doc.data();
           const name = d.name || d.nombre || d.equipo || '';
           if (name.toLowerCase().includes(queryLower)) {
+            const lId = d.leagueId || '';
+            const nombreLiga = leaguesMap[lId] || 'Categoría';
+
             coincidencias.push({
               teamId: doc.id,
               teamName: name,
-              leagueId: d.leagueId || '',
+              leagueId: lId,
+              nombreLiga: nombreLiga,
               nivel: nivelKey,
               nivelNombre: configLiga.nombre
             });
           }
         });
+
         if (coincidencias.length > 0) break;
       }
     }
@@ -673,13 +687,17 @@ async function buscarEquipo(chatId, query) {
   if (coincidencias.length === 1) {
     await responderDetalleEquipo(chatId, coincidencias[0].nivel, coincidencias[0].teamId);
   } else {
+    // Múltiples equipos coincidentes en distintos niveles o ligas
     const inline_keyboard = coincidencias.map(c => [
-      { text: `⚽ ${c.teamName} (${c.nivelNombre})`, callback_data: `verequipo_${c.nivel}_${c.teamId}` }
+      {
+        text: `⚽ ${c.teamName} - ${c.nombreLiga} (${c.nivelNombre})`,
+        callback_data: `verequipo_${c.nivel}_${c.teamId}`
+      }
     ]);
 
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
-      text: `🔍 Se encontraron varios equipos coincidentes con "<b>${query}</b>". Selecciona el que deseas consultar:`,
+      text: `🔍 Se encontraron <b>${coincidencias.length} equipos</b> que coinciden con "<b>${query}</b>". Selecciona el que deseas consultar:`,
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard }
     });
