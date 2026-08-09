@@ -25,6 +25,44 @@ const CODE_TO_NIVEL = {
   'e': 'prepa'
 };
 
+// Caché en memoria para guardar resultados de Firestore en warm instances (TTL: 5 minutos)
+const memoryCache = {};
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function getCachedDocs(docId, collectionName, queryWhereField = null, queryWhereValue = null) {
+  const cacheKey = `${docId}_${collectionName}_${queryWhereField || 'all'}_${queryWhereValue || 'all'}`;
+  const now = Date.now();
+
+  if (memoryCache[cacheKey] && (now - memoryCache[cacheKey].timestamp < CACHE_TTL_MS)) {
+    return memoryCache[cacheKey].data;
+  }
+
+  let ref = db.collection('artifacts')
+    .doc(docId)
+    .collection('public')
+    .doc('data')
+    .collection(collectionName);
+
+  if (queryWhereField && queryWhereValue) {
+    ref = ref.where(queryWhereField, '==', queryWhereValue);
+  }
+
+  const snap = await ref.get();
+  const docs = [];
+  if (!snap.empty) {
+    snap.forEach(d => {
+      docs.push({ id: d.id, ...d.data() });
+    });
+  }
+
+  memoryCache[cacheKey] = {
+    timestamp: now,
+    data: docs
+  };
+
+  return docs;
+}
+
 // Función auxiliar ultra-robusta de 3 niveles con fallback garantizado
 async function sendTelegramMessage(chatId, text, options = {}) {
   try {
@@ -126,7 +164,6 @@ module.exports = async (req, res) => {
           await responderTablaEspecifica(chatId, nivel, leagueId);
         }
       } else if (data.startsWith('vq_')) {
-        // Callback ultra-corto para evitar límite de 64 bytes: vq_p_TEAMID, vq_s_TEAMID, vq_e_TEAMID
         const parts = data.split('_');
         const code = parts[1];
         const nivel = CODE_TO_NIVEL[code] || code;
@@ -177,7 +214,20 @@ module.exports = async (req, res) => {
     return res.status(200).send('OK');
   } catch (error) {
     console.error('Error procesando el mensaje:', error);
-    return res.status(500).send('Error interno');
+    try {
+      const chatId = req.body?.message?.chat?.id || req.body?.callback_query?.message?.chat?.id;
+      if (chatId) {
+        const errStr = String(error?.message || error);
+        if (errStr.includes('RESOURCE_EXHAUSTED')) {
+          await sendTelegramMessage(chatId, '⚠️ <b>LÍMITE DE CONSULTAS ALCANZADO</b>\n\nLa base de datos (Firebase) ha alcanzado su cuota diaria gratuita de lecturas. Por favor, intenta de nuevo más tarde o mañana cuando se reinicie la cuota.', { parse_mode: 'HTML' });
+        } else {
+          await sendTelegramMessage(chatId, '⚠️ Ocurrió un error al procesar tu solicitud. Por favor intenta de nuevo en unos momentos.');
+        }
+      }
+    } catch (e) {
+      console.error('Error enviando notificación de error a Telegram:', e);
+    }
+    return res.status(200).send('OK');
   }
 };
 
@@ -222,19 +272,12 @@ async function enviarMenuTorneos(chatId, modo, nivel, mostrarHistoricos = false)
   let torneos = [];
 
   for (const docId of configLiga.ids) {
-    const snap = await db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data')
-      .collection('tournaments')
-      .get();
-
-    if (!snap.empty) {
-      snap.forEach(doc => {
-        const d = doc.data();
+    const docs = await getCachedDocs(docId, 'tournaments');
+    if (docs.length > 0) {
+      docs.forEach(d => {
         torneos.push({
-          id: doc.id,
-          nombre: d.name || d.nombre || doc.id,
+          id: d.id,
+          nombre: d.name || d.nombre || d.id,
           deporte: d.sport || d.deporte || '',
           createdAt: d.createdAt || ''
         });
@@ -294,20 +337,13 @@ async function enviarMenuCategorias(chatId, modo, nivel, tournamentId) {
   let listaCategorias = [];
 
   for (const docId of configLiga.ids) {
-    const leaguesSnap = await db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data')
-      .collection('leagues')
-      .get();
-
-    if (!leaguesSnap.empty) {
-      leaguesSnap.forEach(doc => {
-        const d = doc.data();
+    const docs = await getCachedDocs(docId, 'leagues');
+    if (docs.length > 0) {
+      docs.forEach(d => {
         if (tournamentId === 'all' || !d.tournamentId || d.tournamentId === tournamentId) {
           listaCategorias.push({
-            id: doc.id,
-            nombre: d.name || d.nombre || d.title || doc.id,
+            id: d.id,
+            nombre: d.name || d.nombre || d.title || d.id,
             deporte: d.sport || d.deporte || ''
           });
         }
@@ -357,25 +393,19 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
   let nombreLiga = 'LIGA';
 
   for (const docId of configLiga.ids) {
-    const dataRef = db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data');
-
-    const leagueDoc = await dataRef.collection('leagues').doc(leagueId).get();
-    if (leagueDoc.exists) {
-      const ld = leagueDoc.data();
-      nombreLiga = ld.name || ld.nombre || ld.title || leagueId;
+    const leaguesDocs = await getCachedDocs(docId, 'leagues');
+    const targetLeague = leaguesDocs.find(l => l.id === leagueId);
+    if (targetLeague) {
+      nombreLiga = targetLeague.name || targetLeague.nombre || targetLeague.title || leagueId;
     }
 
-    const teamsSnap = await dataRef.collection('teams').get();
-    if (!teamsSnap.empty) {
-      teamsSnap.forEach(doc => {
-        const d = doc.data();
+    const teamsDocs = await getCachedDocs(docId, 'teams');
+    if (teamsDocs.length > 0) {
+      teamsDocs.forEach(d => {
         if (!d.leagueId || d.leagueId === leagueId) {
-          equiposMap[doc.id] = {
-            id: doc.id,
-            equipo: d.name || d.nombre || d.equipo || doc.id,
+          equiposMap[d.id] = {
+            id: d.id,
+            equipo: d.name || d.nombre || d.equipo || d.id,
             pj: 0,
             pg: 0,
             pe: 0,
@@ -389,15 +419,15 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
       });
     }
 
-    const matchesSnap = await dataRef.collection('matches').get();
-    if (!matchesSnap.empty) {
-      matchesSnap.forEach(doc => {
-        const m = doc.data();
+    // Filtrar partidos exclusivamente por leagueId en la consulta
+    const matchesDocs = await getCachedDocs(docId, 'matches', 'leagueId', leagueId);
+    if (matchesDocs.length > 0) {
+      matchesDocs.forEach(m => {
         const sHome = (m.scoreHome !== null && m.scoreHome !== undefined && m.scoreHome !== '') ? Number(m.scoreHome) : null;
         const sAway = (m.scoreAway !== null && m.scoreAway !== undefined && m.scoreAway !== '') ? Number(m.scoreAway) : null;
         const esJugado = sHome !== null && !isNaN(sHome) && sAway !== null && !isNaN(sAway);
 
-        if (m.leagueId === leagueId && esJugado) {
+        if (esJugado) {
           const home = equiposMap[m.homeTeamId];
           const away = equiposMap[m.awayTeamId];
 
@@ -481,41 +511,33 @@ async function responderAnotadoresEspecifica(chatId, nivel, leagueId) {
   let goleadoresMap = {};
 
   for (const docId of configLiga.ids) {
-    const dataRef = db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data');
-
-    const leagueDoc = await dataRef.collection('leagues').doc(leagueId).get();
-    if (leagueDoc.exists) {
-      const ld = leagueDoc.data();
-      nombreLiga = ld.name || ld.nombre || ld.title || leagueId;
+    const leaguesDocs = await getCachedDocs(docId, 'leagues');
+    const targetLeague = leaguesDocs.find(l => l.id === leagueId);
+    if (targetLeague) {
+      nombreLiga = targetLeague.name || targetLeague.nombre || targetLeague.title || leagueId;
     }
 
-    const teamsSnap = await dataRef.collection('teams').get();
-    if (!teamsSnap.empty) {
-      teamsSnap.forEach(doc => {
-        const d = doc.data();
-        teamsMap[doc.id] = d.name || d.nombre || d.equipo || doc.id;
+    const teamsDocs = await getCachedDocs(docId, 'teams');
+    if (teamsDocs.length > 0) {
+      teamsDocs.forEach(d => {
+        teamsMap[d.id] = d.name || d.nombre || d.equipo || d.id;
       });
     }
 
-    const playersSnap = await dataRef.collection('players').get();
-    if (!playersSnap.empty) {
-      playersSnap.forEach(doc => {
-        const d = doc.data();
-        playersMap[doc.id] = {
-          name: d.name || d.nombre || doc.id,
+    const playersDocs = await getCachedDocs(docId, 'players');
+    if (playersDocs.length > 0) {
+      playersDocs.forEach(d => {
+        playersMap[d.id] = {
+          name: d.name || d.nombre || d.id,
           teamId: d.teamId || ''
         };
       });
     }
 
-    const matchesSnap = await dataRef.collection('matches').get();
-    if (!matchesSnap.empty) {
-      matchesSnap.forEach(doc => {
-        const m = doc.data();
-        if (m.leagueId === leagueId && Array.isArray(m.scorers)) {
+    const matchesDocs = await getCachedDocs(docId, 'matches', 'leagueId', leagueId);
+    if (matchesDocs.length > 0) {
+      matchesDocs.forEach(m => {
+        if (Array.isArray(m.scorers)) {
           m.scorers.forEach(item => {
             if (!item || !item.playerId) return;
             const pId = item.playerId;
@@ -578,49 +600,40 @@ async function responderPartidosEspecifica(chatId, nivel, leagueId) {
   let proximosPartidos = [];
 
   for (const docId of configLiga.ids) {
-    const dataRef = db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data');
-
-    const leagueDoc = await dataRef.collection('leagues').doc(leagueId).get();
-    if (leagueDoc.exists) {
-      const ld = leagueDoc.data();
-      nombreLiga = ld.name || ld.nombre || ld.title || leagueId;
+    const leaguesDocs = await getCachedDocs(docId, 'leagues');
+    const targetLeague = leaguesDocs.find(l => l.id === leagueId);
+    if (targetLeague) {
+      nombreLiga = targetLeague.name || targetLeague.nombre || targetLeague.title || leagueId;
     }
 
-    const teamsSnap = await dataRef.collection('teams').get();
-    if (!teamsSnap.empty) {
-      teamsSnap.forEach(doc => {
-        const d = doc.data();
-        teamsMap[doc.id] = d.name || d.nombre || d.equipo || doc.id;
+    const teamsDocs = await getCachedDocs(docId, 'teams');
+    if (teamsDocs.length > 0) {
+      teamsDocs.forEach(d => {
+        teamsMap[d.id] = d.name || d.nombre || d.equipo || d.id;
       });
     }
 
-    const matchesSnap = await dataRef.collection('matches').get();
-    if (!matchesSnap.empty) {
-      matchesSnap.forEach(doc => {
-        const m = doc.data();
-        if (m.leagueId === leagueId) {
-          const sHome = (m.scoreHome !== null && m.scoreHome !== undefined && m.scoreHome !== '') ? Number(m.scoreHome) : null;
-          const sAway = (m.scoreAway !== null && m.scoreAway !== undefined && m.scoreAway !== '') ? Number(m.scoreAway) : null;
-          const sinJugar = sHome === null || isNaN(sHome) || sAway === null || isNaN(sAway);
+    const matchesDocs = await getCachedDocs(docId, 'matches', 'leagueId', leagueId);
+    if (matchesDocs.length > 0) {
+      matchesDocs.forEach(m => {
+        const sHome = (m.scoreHome !== null && m.scoreHome !== undefined && m.scoreHome !== '') ? Number(m.scoreHome) : null;
+        const sAway = (m.scoreAway !== null && m.scoreAway !== undefined && m.scoreAway !== '') ? Number(m.scoreAway) : null;
+        const sinJugar = sHome === null || isNaN(sHome) || sAway === null || isNaN(sAway);
 
-          if (sinJugar) {
-            const homeName = teamsMap[m.homeTeamId] || 'Equipo Local';
-            const awayName = teamsMap[m.awayTeamId] || 'Equipo Visitante';
-            const fecha = m.date || m.fecha || 'Por definir';
-            const hora = m.time || m.hora || '';
-            const cancha = m.cancha || m.field || m.location || '';
+        if (sinJugar) {
+          const homeName = teamsMap[m.homeTeamId] || 'Equipo Local';
+          const awayName = teamsMap[m.awayTeamId] || 'Equipo Visitante';
+          const fecha = m.date || m.fecha || 'Por definir';
+          const hora = m.time || m.hora || '';
+          const cancha = m.cancha || m.field || m.location || '';
 
-            proximosPartidos.push({
-              fecha,
-              hora,
-              cancha,
-              homeName,
-              awayName
-            });
-          }
+          proximosPartidos.push({
+            fecha,
+            hora,
+            cancha,
+            homeName,
+            awayName
+          });
         }
       });
     }
@@ -666,21 +679,15 @@ async function buscarEquipo(chatId, query) {
 
   const promesas = Object.entries(LIGAS).map(async ([nivelKey, configLiga]) => {
     for (const docId of configLiga.ids) {
-      const dataRef = db.collection('artifacts')
-        .doc(docId)
-        .collection('public')
-        .doc('data');
+      const teamsDocs = await getCachedDocs(docId, 'teams');
 
-      const teamsSnap = await dataRef.collection('teams').get();
-
-      if (!teamsSnap.empty) {
+      if (teamsDocs.length > 0) {
         const matching = [];
-        teamsSnap.forEach(doc => {
-          const d = doc.data();
+        teamsDocs.forEach(d => {
           const name = d.name || d.nombre || d.equipo || '';
           if (name.toLowerCase().includes(queryLower)) {
             matching.push({
-              teamId: doc.id,
+              teamId: d.id,
               teamName: name,
               leagueId: d.leagueId || '',
               nivel: nivelKey,
@@ -709,23 +716,15 @@ async function buscarEquipo(chatId, query) {
   } else {
     for (const c of coincidencias) {
       if (c.leagueId) {
-        const lDoc = await db.collection('artifacts')
-          .doc(c.docId)
-          .collection('public')
-          .doc('data')
-          .collection('leagues')
-          .doc(c.leagueId)
-          .get();
-
-        if (lDoc.exists) {
-          const lData = lDoc.data();
+        const leaguesDocs = await getCachedDocs(c.docId, 'leagues');
+        const lData = leaguesDocs.find(l => l.id === c.leagueId);
+        if (lData) {
           c.nombreLiga = lData.name || lData.nombre || lData.title || 'Categoría';
         }
       }
       if (!c.nombreLiga) c.nombreLiga = 'Categoría';
     }
 
-    // Usar 'vq_c_ID' como prefijo ultra-corto (< 64 bytes garantizado en callback_data)
     const inline_keyboard = coincidencias.map(c => {
       const code = c.docCode || 'p';
       const labelText = `⚽ ${c.teamName} - ${c.nombreLiga} (${c.nivelNombre})`.substring(0, 50);
@@ -744,7 +743,7 @@ async function buscarEquipo(chatId, query) {
   }
 }
 
-// Genera la tarjeta con la ficha del equipo (filtrando partidos exclusivamente de la liga/deporte del equipo)
+// Genera la tarjeta con la ficha del equipo
 async function responderDetalleEquipo(chatId, nivel, teamId) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
@@ -756,51 +755,40 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
   let partidosEquipo = [];
 
   for (const docId of configLiga.ids) {
-    const dataRef = db.collection('artifacts')
-      .doc(docId)
-      .collection('public')
-      .doc('data');
-
-    // 1. Obtener equipos
-    const teamsSnap = await dataRef.collection('teams').get();
-    if (!teamsSnap.empty) {
-      teamsSnap.forEach(doc => {
-        const d = doc.data();
-        const tName = d.name || d.nombre || d.equipo || doc.id;
-        teamsMap[doc.id] = tName;
-        if (doc.id === teamId) {
-          teamObj = { id: doc.id, name: tName, leagueId: d.leagueId || '' };
+    const teamsDocs = await getCachedDocs(docId, 'teams');
+    if (teamsDocs.length > 0) {
+      teamsDocs.forEach(d => {
+        const tName = d.name || d.nombre || d.equipo || d.id;
+        teamsMap[d.id] = tName;
+        if (d.id === teamId) {
+          teamObj = { id: d.id, name: tName, leagueId: d.leagueId || '' };
         }
       });
     }
 
     if (!teamObj) continue;
 
-    // 2. Obtener nombre y deporte de la liga / torneo
     if (teamObj.leagueId) {
-      const leagueDoc = await dataRef.collection('leagues').doc(teamObj.leagueId).get();
-      if (leagueDoc.exists) {
-        const ld = leagueDoc.data();
+      const leaguesDocs = await getCachedDocs(docId, 'leagues');
+      const ld = leaguesDocs.find(l => l.id === teamObj.leagueId);
+      if (ld) {
         nombreLiga = ld.name || ld.nombre || ld.title || teamObj.leagueId;
         deporteLiga = ld.sport || ld.deporte || '';
 
         if (!deporteLiga && ld.tournamentId) {
-          const tDoc = await dataRef.collection('tournaments').doc(ld.tournamentId).get();
-          if (tDoc.exists) {
-            const tData = tDoc.data();
+          const tourDocs = await getCachedDocs(docId, 'tournaments');
+          const tData = tourDocs.find(t => t.id === ld.tournamentId);
+          if (tData) {
             deporteLiga = tData.sport || tData.deporte || '';
           }
         }
       }
     }
 
-    // 3. Obtener partidos del equipo FILTRANDO EXCLUSIVAMENTE por la liga/deporte del equipo
-    const matchesSnap = await dataRef.collection('matches').get();
-    if (!matchesSnap.empty) {
-      matchesSnap.forEach(doc => {
-        const m = doc.data();
-        const coincideLiga = !teamObj.leagueId || !m.leagueId || m.leagueId === teamObj.leagueId;
-        if (coincideLiga && (m.homeTeamId === teamId || m.awayTeamId === teamId)) {
+    const matchesDocs = await getCachedDocs(docId, 'matches', 'leagueId', teamObj.leagueId);
+    if (matchesDocs.length > 0) {
+      matchesDocs.forEach(m => {
+        if (m.homeTeamId === teamId || m.awayTeamId === teamId) {
           partidosEquipo.push(m);
         }
       });
