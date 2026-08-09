@@ -30,7 +30,6 @@ async function sendTelegramMessage(chatId, text, options = {}) {
   } catch (err) {
     console.error('Error enviando mensaje Telegram con opciones:', err?.response?.data || err.message);
     try {
-      // Si falla el parseo HTML, remover solo parse_mode para mantener los botones (reply_markup)
       const plainText = text.replace(/<[^>]*>/g, '');
       const fallbackOptions = { ...options };
       delete fallbackOptions.parse_mode;
@@ -109,7 +108,7 @@ module.exports = async (req, res) => {
           await responderTablaEspecifica(chatId, nivel, leagueId);
         }
       } else if (data.startsWith('vereq_')) {
-        const parts = data.split('_'); // ['vereq', nivel, teamId...]
+        const parts = data.split('_');
         const nivel = parts[1];
         const teamId = parts.slice(2).join('_');
         await responderDetalleEquipo(chatId, nivel, teamId);
@@ -715,7 +714,7 @@ async function buscarEquipo(chatId, query) {
   }
 }
 
-// Genera la tarjeta con la ficha del equipo (con Deporte, Posición, Último Partido y Próximo Partido)
+// Genera la tarjeta con la ficha del equipo (filtrando partidos exclusivamente de la liga/deporte del equipo)
 async function responderDetalleEquipo(chatId, nivel, teamId) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
@@ -755,7 +754,6 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
         nombreLiga = ld.name || ld.nombre || ld.title || teamObj.leagueId;
         deporteLiga = ld.sport || ld.deporte || '';
 
-        // Si la liga no tiene deporte explícito, buscarlo en su torneo
         if (!deporteLiga && ld.tournamentId) {
           const tDoc = await dataRef.collection('tournaments').doc(ld.tournamentId).get();
           if (tDoc.exists) {
@@ -766,12 +764,13 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
       }
     }
 
-    // 3. Obtener partidos del equipo
+    // 3. Obtener partidos del equipo FILTRANDO EXCLUSIVAMENTE por la liga/deporte del equipo
     const matchesSnap = await dataRef.collection('matches').get();
     if (!matchesSnap.empty) {
       matchesSnap.forEach(doc => {
         const m = doc.data();
-        if (m.homeTeamId === teamId || m.awayTeamId === teamId) {
+        const coincideLiga = !teamObj.leagueId || !m.leagueId || m.leagueId === teamObj.leagueId;
+        if (coincideLiga && (m.homeTeamId === teamId || m.awayTeamId === teamId)) {
           partidosEquipo.push(m);
         }
       });
@@ -844,7 +843,7 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
   }
   mensaje += `\n`;
 
-  mensaje += `📊 <b>Estadísticas:</b>\n`;
+  mensaje += `📊 <b>Estadísticas en esta Liga:</b>\n`;
   mensaje += ` • <b>Puntos:</b> ${puntos} Pts (en ${pj} PJ)\n`;
   mensaje += ` • <b>Rendimiento:</b> ${pg} PG - ${pe} PE - ${pp} PP\n`;
   mensaje += ` • <b>Goles:</b> ${gf} a favor, ${gc} en contra (DG: ${dg >= 0 ? '+' + dg : dg})\n\n`;
