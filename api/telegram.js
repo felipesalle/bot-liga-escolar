@@ -32,7 +32,7 @@ module.exports = async (req, res) => {
       const data = callback.data; // Formato: "action_tipo_nivel_extra"
 
       if (data.startsWith('mod_')) {
-        const modo = data.split('_')[1]; // 'tabla' o 'anotadores'
+        const modo = data.split('_')[1]; // 'tabla', 'anotadores', 'partidos'
         await enviarMenuLigas(chatId, modo);
       } else if (data.startsWith('nivel_')) {
         const [, modo, nivel] = data.split('_');
@@ -41,19 +41,21 @@ module.exports = async (req, res) => {
         const [, modo, nivel] = data.split('_');
         await enviarMenuTorneos(chatId, modo, nivel, true);
       } else if (data.startsWith('torneo_')) {
-        const parts = data.split('_'); // ['torneo', modo, nivel, tournamentId...]
+        const parts = data.split('_');
         const modo = parts[1];
         const nivel = parts[2];
         const tournamentId = parts.slice(3).join('_');
         await enviarMenuCategorias(chatId, modo, nivel, tournamentId);
       } else if (data.startsWith('verliga_')) {
-        const parts = data.split('_'); // ['verliga', modo, nivel, leagueId...]
+        const parts = data.split('_');
         const modo = parts[1];
         const nivel = parts[2];
         const leagueId = parts.slice(3).join('_');
 
         if (modo === 'anotadores') {
           await responderAnotadoresEspecifica(chatId, nivel, leagueId);
+        } else if (modo === 'partidos') {
+          await responderPartidosEspecifica(chatId, nivel, leagueId);
         } else {
           await responderTablaEspecifica(chatId, nivel, leagueId);
         }
@@ -73,6 +75,8 @@ module.exports = async (req, res) => {
         await enviarMenuLigas(chatId, 'tabla');
       } else if (text === '/anotadores' || text === 'anotadores' || text === '/goleadores' || text === 'goleadores') {
         await enviarMenuLigas(chatId, 'anotadores');
+      } else if (text === '/jornada' || text === 'jornada' || text === '/partidos' || text === 'partidos' || text === '/rol' || text === 'rol') {
+        await enviarMenuLigas(chatId, 'partidos');
       } else if (text === '/primaria' || text === 'primaria') {
         await enviarMenuTorneos(chatId, 'tabla', 'primaria', false);
       } else if (text === '/secundaria' || text === 'secundaria') {
@@ -82,7 +86,7 @@ module.exports = async (req, res) => {
       } else {
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: 'Selecciona una opción usando los comandos:\n🏆 /tabla - Ver Clasificación\n⚽ /anotadores - Ver Goleadores'
+          text: 'Selecciona una opción usando los comandos:\n🏆 /tabla - Ver Clasificación\n⚽ /anotadores - Ver Goleadores\n📅 /partidos - Ver Rol de Juegos / Próximos Partidos'
         });
       }
     }
@@ -94,7 +98,7 @@ module.exports = async (req, res) => {
   }
 };
 
-// Menú Inicio: Elegir entre Clasificación y Anotadores
+// Menú Inicio: Elegir entre Clasificación, Anotadores y Próximos Partidos
 async function enviarMenuInicio(chatId) {
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
@@ -103,15 +107,19 @@ async function enviarMenuInicio(chatId) {
     reply_markup: {
       inline_keyboard: [
         [{ text: '🏆 Ver Clasificación / Posiciones', callback_data: 'mod_tabla' }],
-        [{ text: '⚽ Ver Tabla de Anotadores / Goleadores', callback_data: 'mod_anotadores' }]
+        [{ text: '⚽ Ver Tabla de Anotadores / Goleadores', callback_data: 'mod_anotadores' }],
+        [{ text: '📅 Ver Próximos Partidos / Rol de Juegos', callback_data: 'mod_partidos' }]
       ]
     }
   });
 }
 
-// Menú Nivel 1: Seleccionar Nivel (Primaria, Secundaria, Prepa)
+// Menú Nivel 1: Seleccionar Nivel
 async function enviarMenuLigas(chatId, modo = 'tabla') {
-  const tituloModo = modo === 'anotadores' ? '⚽ ANOTADORES' : '🏆 CLASIFICACIÓN';
+  let tituloModo = '🏆 CLASIFICACIÓN';
+  if (modo === 'anotadores') tituloModo = '⚽ ANOTADORES';
+  if (modo === 'partidos') tituloModo = '📅 PRÓXIMOS PARTIDOS / ROL';
+
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
     text: `<b>${tituloModo} - SELECCIONA EL NIVEL:</b>`,
@@ -184,7 +192,10 @@ async function enviarMenuTorneos(chatId, modo, nivel, mostrarHistoricos = false)
     });
   }
 
-  const tituloModo = modo === 'anotadores' ? '⚽ ANOTADORES' : '🏆 CLASIFICACIÓN';
+  let tituloModo = '🏆 CLASIFICACIÓN';
+  if (modo === 'anotadores') tituloModo = '⚽ ANOTADORES';
+  if (modo === 'partidos') tituloModo = '📅 ROL DE JUEGOS';
+
   const titulo = mostrarHistoricos
     ? `<b>📜 CAMPEONATOS HISTÓRICOS (${tituloModo}) - ${configLiga.nombre}:</b>`
     : `<b>🏆 CAMPEONATO ACTUAL (${tituloModo}) - ${configLiga.nombre}:</b>`;
@@ -235,11 +246,14 @@ async function enviarMenuCategorias(chatId, modo, nivel, tournamentId) {
     return;
   }
 
+  let icon = '🏆';
+  if (modo === 'anotadores') icon = '⚽';
+  if (modo === 'partidos') icon = '📅';
+
   const inline_keyboard = [];
   for (let i = 0; i < listaCategorias.length; i += 2) {
     const row = [];
     const cat1 = listaCategorias[i];
-    const icon = modo === 'anotadores' ? '⚽' : '🏆';
     row.push({ text: `${icon} ${cat1.nombre}`, callback_data: `verliga_${modo}_${nivel}_${cat1.id}` });
 
     if (i + 1 < listaCategorias.length) {
@@ -249,7 +263,9 @@ async function enviarMenuCategorias(chatId, modo, nivel, tournamentId) {
     inline_keyboard.push(row);
   }
 
-  const tituloModo = modo === 'anotadores' ? '⚽ ANOTADORES' : '🏆 CLASIFICACIÓN';
+  let tituloModo = '🏆 CLASIFICACIÓN';
+  if (modo === 'anotadores') tituloModo = '⚽ ANOTADORES';
+  if (modo === 'partidos') tituloModo = '📅 ROL DE JUEGOS';
 
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
@@ -483,6 +499,107 @@ async function responderAnotadoresEspecifica(chatId, nivel, leagueId) {
     mensaje += `${pos}. ${jugador}${equipo}${goles}\n`;
   });
   mensaje += '</pre>';
+
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: chatId,
+    text: mensaje,
+    parse_mode: 'HTML'
+  });
+}
+
+// Responde con el Rol de Juegos / Próximos Partidos para una Liga/Categoría específica
+async function responderPartidosEspecifica(chatId, nivel, leagueId) {
+  const configLiga = LIGAS[nivel];
+  if (!configLiga) return;
+
+  let nombreLiga = 'LIGA';
+  let teamsMap = {};
+  let proximosPartidos = [];
+
+  for (const docId of configLiga.ids) {
+    const dataRef = db.collection('artifacts')
+      .doc(docId)
+      .collection('public')
+      .doc('data');
+
+    const leagueDoc = await dataRef.collection('leagues').doc(leagueId).get();
+    if (leagueDoc.exists) {
+      const ld = leagueDoc.data();
+      nombreLiga = ld.name || ld.nombre || ld.title || leagueId;
+    }
+
+    const teamsSnap = await dataRef.collection('teams').get();
+    if (!teamsSnap.empty) {
+      teamsSnap.forEach(doc => {
+        const d = doc.data();
+        teamsMap[doc.id] = d.name || d.nombre || d.equipo || doc.id;
+      });
+    }
+
+    const matchesSnap = await dataRef.collection('matches').get();
+    if (!matchesSnap.empty) {
+      matchesSnap.forEach(doc => {
+        const m = doc.data();
+        if (m.leagueId === leagueId) {
+          // Si scoreHome es null o no es numero, es un proximo partido sin jugar
+          const sinJugar = (m.scoreHome === null || m.scoreHome === undefined || typeof m.scoreHome !== 'number');
+
+          if (sinJugar) {
+            const homeName = teamsMap[m.homeTeamId] || 'Equipo Local';
+            const awayName = teamsMap[m.awayTeamId] || 'Equipo Visitante';
+            const fecha = m.date || m.fecha || 'Por definir';
+            const hora = m.time || m.hora || '';
+            const cancha = m.cancha || m.field || m.location || '';
+
+            proximosPartidos.push({
+              fecha,
+              hora,
+              cancha,
+              homeName,
+              awayName
+            });
+          }
+        }
+      });
+    }
+
+    if (proximosPartidos.length > 0) break;
+  }
+
+  if (proximosPartidos.length === 0) {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text: `⚠️ No hay próximos partidos programados actualmente para la categoría <b>${nombreLiga}</b>.`,
+      parse_mode: 'HTML'
+    });
+    return;
+  }
+
+  // Ordenar por fecha ascendente
+  proximosPartidos.sort((a, b) => (a.fecha || '').localeCompare(b.fecha || ''));
+
+  // Agrupar por fecha
+  const partidosPorFecha = {};
+  proximosPartidos.forEach(p => {
+    if (!partidosPorFecha[p.fecha]) partidosPorFecha[p.fecha] = [];
+    partidosPorFecha[p.fecha].push(p);
+  });
+
+  let mensaje = `<b>📅 ROL DE JUEGOS - ${configLiga.nombre}</b>\n`;
+  mensaje += `📌 <b>Categoría:</b> ${nombreLiga}\n\n`;
+
+  for (const [fecha, partidos] of Object.entries(partidosPorFecha)) {
+    mensaje += `🗓 <b>Fecha: ${fecha}</b>\n`;
+    partidos.forEach(p => {
+      let extra = '';
+      if (p.hora) extra += ` (${p.hora}`;
+      if (p.cancha) extra += extra ? ` - ${p.cancha})` : ` (${p.cancha})`;
+      else if (extra) extra += ')';
+
+      mensaje += `  • <b>${p.homeName}</b> 🆚 <b>${p.awayName}</b>${extra}\n`;
+    });
+    mensaje += '\n';
+  }
 
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
