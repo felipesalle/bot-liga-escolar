@@ -109,6 +109,7 @@ module.exports = async (req, res) => {
       } else if (lower === '/prepa' || lower === 'prepa') {
         await enviarMenuTorneos(chatId, 'tabla', 'prepa', false);
       } else {
+        // Búsqueda libre
         await buscarEquipo(chatId, text);
       }
     }
@@ -120,7 +121,7 @@ module.exports = async (req, res) => {
   }
 };
 
-// Menú Inicio: Elegir entre Clasificación, Anotadores, Próximos Partidos y Buscar Equipo
+// Menú Inicio
 async function enviarMenuInicio(chatId) {
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
@@ -628,12 +629,12 @@ async function responderPartidosEspecifica(chatId, nivel, leagueId) {
   });
 }
 
-// Búsqueda rápida por nombre de equipo (soporta múltiples coincidencias en distintas ligas y niveles)
+// Búsqueda rápida optimizada por nombre de equipo
 async function buscarEquipo(chatId, query) {
   const queryLower = query.toLowerCase().trim();
-  let coincidencias = [];
 
-  for (const [nivelKey, configLiga] of Object.entries(LIGAS)) {
+  // Consultar todos los niveles en paralelo (Promise.all)
+  const promesas = Object.entries(LIGAS).map(async ([nivelKey, configLiga]) => {
     for (const docId of configLiga.ids) {
       const dataRef = db.collection('artifacts')
         .doc(docId)
@@ -643,37 +644,29 @@ async function buscarEquipo(chatId, query) {
       const teamsSnap = await dataRef.collection('teams').get();
 
       if (!teamsSnap.empty) {
-        let leaguesMap = {};
-        const leaguesSnap = await dataRef.collection('leagues').get();
-        if (!leaguesSnap.empty) {
-          leaguesSnap.forEach(lDoc => {
-            const lData = lDoc.data();
-            leaguesMap[lDoc.id] = lData.name || lData.nombre || lData.title || lDoc.id;
-          });
-        }
-
+        const matching = [];
         teamsSnap.forEach(doc => {
           const d = doc.data();
           const name = d.name || d.nombre || d.equipo || '';
           if (name.toLowerCase().includes(queryLower)) {
-            const lId = d.leagueId || '';
-            const nombreLiga = leaguesMap[lId] || 'Categoría';
-
-            coincidencias.push({
+            matching.push({
               teamId: doc.id,
               teamName: name,
-              leagueId: lId,
-              nombreLiga: nombreLiga,
+              leagueId: d.leagueId || '',
               nivel: nivelKey,
-              nivelNombre: configLiga.nombre
+              nivelNombre: configLiga.nombre,
+              docId
             });
           }
         });
-
-        if (coincidencias.length > 0) break;
+        if (matching.length > 0) return matching;
       }
     }
-  }
+    return [];
+  });
+
+  const resultadosPorNivel = await Promise.all(promesas);
+  const coincidencias = resultadosPorNivel.flat();
 
   if (coincidencias.length === 0) {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -687,7 +680,25 @@ async function buscarEquipo(chatId, query) {
   if (coincidencias.length === 1) {
     await responderDetalleEquipo(chatId, coincidencias[0].nivel, coincidencias[0].teamId);
   } else {
-    // Múltiples equipos coincidentes en distintos niveles o ligas
+    // Si hay más de 1 coincidencia, obtener los nombres de sus categorías
+    for (const c of coincidencias) {
+      if (c.leagueId) {
+        const lDoc = await db.collection('artifacts')
+          .doc(c.docId)
+          .collection('public')
+          .doc('data')
+          .collection('leagues')
+          .doc(c.leagueId)
+          .get();
+
+        if (lDoc.exists) {
+          const lData = lDoc.data();
+          c.nombreLiga = lData.name || lData.nombre || lData.title || 'Categoría';
+        }
+      }
+      if (!c.nombreLiga) c.nombreLiga = 'Categoría';
+    }
+
     const inline_keyboard = coincidencias.map(c => [
       {
         text: `⚽ ${c.teamName} - ${c.nombreLiga} (${c.nivelNombre})`,
