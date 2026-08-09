@@ -19,6 +19,37 @@ const LIGAS = {
   'prepa': { ids: ['default-app-id', 'default-app-io', 'lasalle-prepa-deportes', 'lasalle-prepa', 'prepa'], nombre: '🏫 PREPA' }
 };
 
+// Función auxiliar robusta para enviar mensajes a Telegram con fallback automático
+async function sendTelegramMessage(chatId, text, options = {}) {
+  try {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text: text,
+      ...options
+    });
+  } catch (err) {
+    console.error('Error enviando mensaje Telegram con opciones:', err?.response?.data || err.message);
+    try {
+      // Si falla por formato HTML o sintaxis, enviar como texto plano sin formato
+      const plainText = text.replace(/<[^>]*>/g, '');
+      await axios.post(`${TELEGRAM_API}/sendMessage`, {
+        chat_id: chatId,
+        text: plainText
+      });
+    } catch (fallbackErr) {
+      console.error('Error crítico en fallback Telegram:', fallbackErr?.response?.data || fallbackErr.message);
+    }
+  }
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(200).send('Bot activo');
 
@@ -29,16 +60,12 @@ module.exports = async (req, res) => {
     if (update.callback_query) {
       const callback = update.callback_query;
       const chatId = callback.message.chat.id;
-      const data = callback.data; // Formato: "action_tipo_nivel_extra"
+      const data = callback.data;
 
       if (data.startsWith('mod_')) {
-        const modo = data.split('_')[1]; // 'tabla', 'anotadores', 'partidos', 'buscar'
+        const modo = data.split('_')[1];
         if (modo === 'buscar') {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: '🔍 <b>BÚSQUEDA DE EQUIPO</b>\n\nEscribe el comando <code>/equipo</code> seguido del nombre de tu equipo.\nEjemplo: <code>/equipo Mexico</code> o <code>/buscar Perú</code>',
-            parse_mode: 'HTML'
-          });
+          await sendTelegramMessage(chatId, '🔍 <b>BÚSQUEDA DE EQUIPO</b>\n\nEscribe el nombre de tu equipo directamente o usa el comando <code>/equipo</code>.\nEjemplo: <code>/equipo Mexico</code> o <code>/buscar Perú</code>', { parse_mode: 'HTML' });
         } else {
           await enviarMenuLigas(chatId, modo);
         }
@@ -94,11 +121,7 @@ module.exports = async (req, res) => {
       } else if (lower.startsWith('/equipo') || lower.startsWith('/buscar') || lower.startsWith('equipo ') || lower.startsWith('buscar ')) {
         const query = text.replace(/^\/(equipo|buscar)\s*/i, '').replace(/^(equipo|buscar)\s*/i, '').trim();
         if (!query) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: 'Escribe el nombre del equipo después del comando.\nEjemplo: <code>/equipo Mexico</code> o <code>/buscar Perú</code>',
-            parse_mode: 'HTML'
-          });
+          await sendTelegramMessage(chatId, 'Escribe el nombre del equipo después del comando.\nEjemplo: <code>/equipo Mexico</code> o <code>/buscar Perú</code>', { parse_mode: 'HTML' });
         } else {
           await buscarEquipo(chatId, query);
         }
@@ -109,7 +132,6 @@ module.exports = async (req, res) => {
       } else if (lower === '/prepa' || lower === 'prepa') {
         await enviarMenuTorneos(chatId, 'tabla', 'prepa', false);
       } else {
-        // Búsqueda libre
         await buscarEquipo(chatId, text);
       }
     }
@@ -123,9 +145,7 @@ module.exports = async (req, res) => {
 
 // Menú Inicio
 async function enviarMenuInicio(chatId) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: '<b>⚽ BIENVENIDO AL BOT DE LIGAS ESCOLARES 🏆</b>\n\n¿Qué información deseas consultar?',
+  await sendTelegramMessage(chatId, '<b>⚽ BIENVENIDO AL BOT DE LIGAS ESCOLARES 🏆</b>\n\n¿Qué información deseas consultar?', {
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [
@@ -144,9 +164,7 @@ async function enviarMenuLigas(chatId, modo = 'tabla') {
   if (modo === 'anotadores') tituloModo = '⚽ ANOTADORES';
   if (modo === 'partidos') tituloModo = '📅 PRÓXIMOS PARTIDOS / ROL';
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: `<b>${tituloModo} - SELECCIONA EL NIVEL:</b>`,
+  await sendTelegramMessage(chatId, `<b>${tituloModo} - SELECCIONA EL NIVEL:</b>`, {
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [
@@ -199,7 +217,7 @@ async function enviarMenuTorneos(chatId, modo, nivel, mostrarHistoricos = false)
   if (!mostrarHistoricos) {
     const actual = torneos[0];
     inline_keyboard.push([
-      { text: `⭐ ${actual.nombre}`, callback_data: `torneo_${modo}_${nivel}_${actual.id}` }
+      { text: `⭐ ${escapeHtml(actual.nombre)}`, callback_data: `torneo_${modo}_${nivel}_${actual.id}` }
     ]);
 
     if (torneos.length > 1) {
@@ -211,7 +229,7 @@ async function enviarMenuTorneos(chatId, modo, nivel, mostrarHistoricos = false)
     torneos.forEach((t, idx) => {
       const tag = idx === 0 ? ' (Actual)' : ' (Histórico)';
       inline_keyboard.push([
-        { text: `🏆 ${t.nombre}${tag}`, callback_data: `torneo_${modo}_${nivel}_${t.id}` }
+        { text: `🏆 ${escapeHtml(t.nombre)}${tag}`, callback_data: `torneo_${modo}_${nivel}_${t.id}` }
       ]);
     });
   }
@@ -224,9 +242,7 @@ async function enviarMenuTorneos(chatId, modo, nivel, mostrarHistoricos = false)
     ? `<b>📜 CAMPEONATOS HISTÓRICOS (${tituloModo}) - ${configLiga.nombre}:</b>`
     : `<b>🏆 CAMPEONATO ACTUAL (${tituloModo}) - ${configLiga.nombre}:</b>`;
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: `${titulo}\nSelecciona el torneo a consultar:`,
+  await sendTelegramMessage(chatId, `${titulo}\nSelecciona el torneo a consultar:`, {
     parse_mode: 'HTML',
     reply_markup: { inline_keyboard }
   });
@@ -263,10 +279,7 @@ async function enviarMenuCategorias(chatId, modo, nivel, tournamentId) {
   }
 
   if (listaCategorias.length === 0) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: `⚠️ No se encontraron categorías/ligas registradas para el torneo seleccionado en ${configLiga.nombre}.`
-    });
+    await sendTelegramMessage(chatId, `⚠️ No se encontraron categorías/ligas registradas para el torneo seleccionado en ${configLiga.nombre}.`);
     return;
   }
 
@@ -291,9 +304,7 @@ async function enviarMenuCategorias(chatId, modo, nivel, tournamentId) {
   if (modo === 'anotadores') tituloModo = '⚽ ANOTADORES';
   if (modo === 'partidos') tituloModo = '📅 ROL DE JUEGOS';
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: `<b>📋 CATEGORÍAS (${tituloModo}) - ${configLiga.nombre}:</b>\nSelecciona la categoría a consultar:`,
+  await sendTelegramMessage(chatId, `<b>📋 CATEGORÍAS (${tituloModo}) - ${configLiga.nombre}:</b>\nSelecciona la categoría a consultar:`, {
     parse_mode: 'HTML',
     reply_markup: { inline_keyboard }
   });
@@ -344,27 +355,31 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
     if (!matchesSnap.empty) {
       matchesSnap.forEach(doc => {
         const m = doc.data();
-        if (m.leagueId === leagueId && typeof m.scoreHome === 'number' && typeof m.scoreAway === 'number') {
+        const sHome = (m.scoreHome !== null && m.scoreHome !== undefined && m.scoreHome !== '') ? Number(m.scoreHome) : null;
+        const sAway = (m.scoreAway !== null && m.scoreAway !== undefined && m.scoreAway !== '') ? Number(m.scoreAway) : null;
+        const esJugado = sHome !== null && !isNaN(sHome) && sAway !== null && !isNaN(sAway);
+
+        if (m.leagueId === leagueId && esJugado) {
           const home = equiposMap[m.homeTeamId];
           const away = equiposMap[m.awayTeamId];
 
           if (home) {
             home.pj += 1;
-            home.gf += m.scoreHome;
-            home.gc += m.scoreAway;
+            home.gf += sHome;
+            home.gc += sAway;
           }
           if (away) {
             away.pj += 1;
-            away.gf += m.scoreAway;
-            away.gc += m.scoreHome;
+            away.gf += sAway;
+            away.gc += sHome;
           }
 
           if (home && away) {
-            if (m.scoreHome > m.scoreAway) {
+            if (sHome > sAway) {
               home.pg += 1;
               home.puntos += 3;
               away.pp += 1;
-            } else if (m.scoreAway > m.scoreHome) {
+            } else if (sAway > sHome) {
               away.pg += 1;
               away.puntos += 3;
               home.pp += 1;
@@ -385,11 +400,7 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
   const listaEquipos = Object.values(equiposMap);
 
   if (listaEquipos.length === 0) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: `⚠️ No se encontraron equipos registrados para la categoría <b>${nombreLiga}</b>.`,
-      parse_mode: 'HTML'
-    });
+    await sendTelegramMessage(chatId, `⚠️ No se encontraron equipos registrados para la categoría <b>${escapeHtml(nombreLiga)}</b>.`, { parse_mode: 'HTML' });
     return;
   }
 
@@ -403,8 +414,8 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
     return b.gf - a.gf;
   });
 
-  let mensaje = `<b>🏆 CLASIFICACIÓN - ${configLiga.nombre}</b>\n`;
-  mensaje += `📌 <b>Categoría:</b> ${nombreLiga}\n\n`;
+  let mensaje = `<b>🏆 CLASIFICACIÓN - ${escapeHtml(configLiga.nombre)}</b>\n`;
+  mensaje += `📌 <b>Categoría:</b> ${escapeHtml(nombreLiga)}\n\n`;
   mensaje += '<pre>';
   mensaje += 'Pos Equipo       PJ  Pts\n';
   mensaje += '------------------------\n';
@@ -418,14 +429,10 @@ async function responderTablaEspecifica(chatId, nivel, leagueId) {
   });
   mensaje += '</pre>';
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: mensaje,
-    parse_mode: 'HTML'
-  });
+  await sendTelegramMessage(chatId, mensaje, { parse_mode: 'HTML' });
 }
 
-// Responde con la tabla de goleadores/anotadores para una Liga/Categoría específica
+// Responde con la tabla de goleadores/anotadores
 async function responderAnotadoresEspecifica(chatId, nivel, leagueId) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
@@ -499,18 +506,14 @@ async function responderAnotadoresEspecifica(chatId, nivel, leagueId) {
   const listaGoleadores = Object.values(goleadoresMap);
 
   if (listaGoleadores.length === 0) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: `⚠️ No hay goles registrados aún para la categoría <b>${nombreLiga}</b>.`,
-      parse_mode: 'HTML'
-    });
+    await sendTelegramMessage(chatId, `⚠️ No hay goles registrados aún para la categoría <b>${escapeHtml(nombreLiga)}</b>.`, { parse_mode: 'HTML' });
     return;
   }
 
   listaGoleadores.sort((a, b) => b.goles - a.goles);
 
-  let mensaje = `<b>⚽ TABLA DE ANOTADORES - ${configLiga.nombre}</b>\n`;
-  mensaje += `📌 <b>Categoría:</b> ${nombreLiga}\n\n`;
+  let mensaje = `<b>⚽ TABLA DE ANOTADORES - ${escapeHtml(configLiga.nombre)}</b>\n`;
+  mensaje += `📌 <b>Categoría:</b> ${escapeHtml(nombreLiga)}\n\n`;
   mensaje += '<pre>';
   mensaje += 'Pos Jugador       Equipo      Goles\n';
   mensaje += '-----------------------------------\n';
@@ -524,14 +527,10 @@ async function responderAnotadoresEspecifica(chatId, nivel, leagueId) {
   });
   mensaje += '</pre>';
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: mensaje,
-    parse_mode: 'HTML'
-  });
+  await sendTelegramMessage(chatId, mensaje, { parse_mode: 'HTML' });
 }
 
-// Responde con el Rol de Juegos / Próximos Partidos para una Liga/Categoría específica
+// Responde con el Rol de Juegos / Próximos Partidos
 async function responderPartidosEspecifica(chatId, nivel, leagueId) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
@@ -565,7 +564,9 @@ async function responderPartidosEspecifica(chatId, nivel, leagueId) {
       matchesSnap.forEach(doc => {
         const m = doc.data();
         if (m.leagueId === leagueId) {
-          const sinJugar = (m.scoreHome === null || m.scoreHome === undefined || typeof m.scoreHome !== 'number');
+          const sHome = (m.scoreHome !== null && m.scoreHome !== undefined && m.scoreHome !== '') ? Number(m.scoreHome) : null;
+          const sAway = (m.scoreAway !== null && m.scoreAway !== undefined && m.scoreAway !== '') ? Number(m.scoreAway) : null;
+          const sinJugar = sHome === null || isNaN(sHome) || sAway === null || isNaN(sAway);
 
           if (sinJugar) {
             const homeName = teamsMap[m.homeTeamId] || 'Equipo Local';
@@ -590,11 +591,7 @@ async function responderPartidosEspecifica(chatId, nivel, leagueId) {
   }
 
   if (proximosPartidos.length === 0) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: `⚠️ No hay próximos partidos programados actualmente para la categoría <b>${nombreLiga}</b>.`,
-      parse_mode: 'HTML'
-    });
+    await sendTelegramMessage(chatId, `⚠️ No hay próximos partidos programados actualmente para la categoría <b>${escapeHtml(nombreLiga)}</b>.`, { parse_mode: 'HTML' });
     return;
   }
 
@@ -606,34 +603,29 @@ async function responderPartidosEspecifica(chatId, nivel, leagueId) {
     partidosPorFecha[p.fecha].push(p);
   });
 
-  let mensaje = `<b>📅 ROL DE JUEGOS - ${configLiga.nombre}</b>\n`;
-  mensaje += `📌 <b>Categoría:</b> ${nombreLiga}\n\n`;
+  let mensaje = `<b>📅 ROL DE JUEGOS - ${escapeHtml(configLiga.nombre)}</b>\n`;
+  mensaje += `📌 <b>Categoría:</b> ${escapeHtml(nombreLiga)}\n\n`;
 
   for (const [fecha, partidos] of Object.entries(partidosPorFecha)) {
-    mensaje += `🗓 <b>Fecha: ${fecha}</b>\n`;
+    mensaje += `🗓 <b>Fecha: ${escapeHtml(fecha)}</b>\n`;
     partidos.forEach(p => {
       let extra = '';
-      if (p.hora) extra += ` (${p.hora}`;
-      if (p.cancha) extra += extra ? ` - ${p.cancha})` : ` (${p.cancha})`;
+      if (p.hora) extra += ` (${escapeHtml(p.hora)}`;
+      if (p.cancha) extra += extra ? ` - ${escapeHtml(p.cancha)})` : ` (${escapeHtml(p.cancha)})`;
       else if (extra) extra += ')';
 
-      mensaje += `  • <b>${p.homeName}</b> 🆚 <b>${p.awayName}</b>${extra}\n`;
+      mensaje += `  • <b>${escapeHtml(p.homeName)}</b> 🆚 <b>${escapeHtml(p.awayName)}</b>${extra}\n`;
     });
     mensaje += '\n';
   }
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: mensaje,
-    parse_mode: 'HTML'
-  });
+  await sendTelegramMessage(chatId, mensaje, { parse_mode: 'HTML' });
 }
 
 // Búsqueda rápida optimizada por nombre de equipo
 async function buscarEquipo(chatId, query) {
   const queryLower = query.toLowerCase().trim();
 
-  // Consultar todos los niveles en paralelo (Promise.all)
   const promesas = Object.entries(LIGAS).map(async ([nivelKey, configLiga]) => {
     for (const docId of configLiga.ids) {
       const dataRef = db.collection('artifacts')
@@ -669,18 +661,13 @@ async function buscarEquipo(chatId, query) {
   const coincidencias = resultadosPorNivel.flat();
 
   if (coincidencias.length === 0) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: `⚠️ No se encontró ningún equipo que coincida con "<b>${query}</b>".`,
-      parse_mode: 'HTML'
-    });
+    await sendTelegramMessage(chatId, `⚠️ No se encontró ningún equipo que coincida con "<b>${escapeHtml(query)}</b>".`, { parse_mode: 'HTML' });
     return;
   }
 
   if (coincidencias.length === 1) {
     await responderDetalleEquipo(chatId, coincidencias[0].nivel, coincidencias[0].teamId);
   } else {
-    // Si hay más de 1 coincidencia, obtener los nombres de sus categorías
     for (const c of coincidencias) {
       if (c.leagueId) {
         const lDoc = await db.collection('artifacts')
@@ -706,16 +693,14 @@ async function buscarEquipo(chatId, query) {
       }
     ]);
 
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: `🔍 Se encontraron <b>${coincidencias.length} equipos</b> que coinciden con "<b>${query}</b>". Selecciona el que deseas consultar:`,
+    await sendTelegramMessage(chatId, `🔍 Se encontraron <b>${coincidencias.length} equipos</b> que coinciden con "<b>${escapeHtml(query)}</b>". Selecciona el que deseas consultar:`, {
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard }
     });
   }
 }
 
-// Genera la tarjeta con la ficha del equipo (Posición, Último Partido y Próximo Partido)
+// Genera la tarjeta con la ficha del equipo
 async function responderDetalleEquipo(chatId, nivel, teamId) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) return;
@@ -731,7 +716,6 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
       .collection('public')
       .doc('data');
 
-    // 1. Obtener equipos
     const teamsSnap = await dataRef.collection('teams').get();
     if (!teamsSnap.empty) {
       teamsSnap.forEach(doc => {
@@ -746,7 +730,6 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
 
     if (!teamObj) continue;
 
-    // 2. Obtener nombre de la liga
     if (teamObj.leagueId) {
       const leagueDoc = await dataRef.collection('leagues').doc(teamObj.leagueId).get();
       if (leagueDoc.exists) {
@@ -755,7 +738,6 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
       }
     }
 
-    // 3. Obtener partidos
     const matchesSnap = await dataRef.collection('matches').get();
     if (!matchesSnap.empty) {
       matchesSnap.forEach(doc => {
@@ -770,14 +752,10 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
   }
 
   if (!teamObj) {
-    await axios.post(`${TELEGRAM_API}/sendMessage`, {
-      chat_id: chatId,
-      text: '⚠️ No se encontró la información detallada para este equipo.'
-    });
+    await sendTelegramMessage(chatId, '⚠️ No se encontró la información detallada para este equipo.');
     return;
   }
 
-  // Calcular estadísticas del equipo en su liga
   let pj = 0, pg = 0, pe = 0, pp = 0, gf = 0, gc = 0, puntos = 0;
   let ultimoPartido = null;
   let proximoPartido = null;
@@ -785,22 +763,26 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
   partidosEquipo.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
 
   partidosEquipo.forEach(m => {
-    const esJugado = typeof m.scoreHome === 'number' && typeof m.scoreAway === 'number';
+    const sHome = (m.scoreHome !== null && m.scoreHome !== undefined && m.scoreHome !== '') ? Number(m.scoreHome) : null;
+    const sAway = (m.scoreAway !== null && m.scoreAway !== undefined && m.scoreAway !== '') ? Number(m.scoreAway) : null;
+    const esJugado = sHome !== null && !isNaN(sHome) && sAway !== null && !isNaN(sAway);
+
     const esHome = m.homeTeamId === teamId;
     const rivalId = esHome ? m.awayTeamId : m.homeTeamId;
     const rivalName = teamsMap[rivalId] || 'Rival';
 
     if (esJugado) {
+      const gE = esHome ? sHome : sAway;
+      const gR = esHome ? sAway : sHome;
+
       ultimoPartido = {
         fecha: m.date || '',
-        golesEquipo: esHome ? m.scoreHome : m.scoreAway,
-        golesRival: esHome ? m.scoreAway : m.scoreHome,
+        golesEquipo: gE,
+        golesRival: gR,
         rivalName
       };
 
       pj += 1;
-      const gE = esHome ? m.scoreHome : m.scoreAway;
-      const gR = esHome ? m.scoreAway : m.scoreHome;
       gf += gE;
       gc += gR;
 
@@ -825,8 +807,8 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
 
   const dg = gf - gc;
 
-  let mensaje = `<b>⚽ FICHA DE EQUIPO - ${teamObj.name}</b>\n`;
-  mensaje += `📌 <b>Categoría:</b> ${nombreLiga} (${configLiga.nombre})\n\n`;
+  let mensaje = `<b>⚽ FICHA DE EQUIPO - ${escapeHtml(teamObj.name)}</b>\n`;
+  mensaje += `📌 <b>Categoría:</b> ${escapeHtml(nombreLiga)} (${configLiga.nombre})\n\n`;
 
   mensaje += `📊 <b>Estadísticas:</b>\n`;
   mensaje += ` • <b>Puntos:</b> ${puntos} Pts (en ${pj} PJ)\n`;
@@ -835,24 +817,20 @@ async function responderDetalleEquipo(chatId, nivel, teamId) {
 
   if (ultimoPartido) {
     mensaje += `⚽ <b>Último Partido Jugado:</b>\n`;
-    mensaje += `  ${teamObj.name} ${ultimoPartido.golesEquipo} 🆚 ${ultimoPartido.golesRival} ${ultimoPartido.rivalName} (${ultimoPartido.fecha})\n\n`;
+    mensaje += `  ${escapeHtml(teamObj.name)} ${ultimoPartido.golesEquipo} 🆚 ${ultimoPartido.golesRival} ${escapeHtml(ultimoPartido.rivalName)} (${escapeHtml(ultimoPartido.fecha)})\n\n`;
   }
 
   if (proximoPartido) {
     let extra = '';
-    if (proximoPartido.hora) extra += ` (${proximoPartido.hora}`;
-    if (proximoPartido.cancha) extra += extra ? ` - ${proximoPartido.cancha})` : ` (${proximoPartido.cancha})`;
+    if (proximoPartido.hora) extra += ` (${escapeHtml(proximoPartido.hora)}`;
+    if (proximoPartido.cancha) extra += extra ? ` - ${escapeHtml(proximoPartido.cancha)})` : ` (${escapeHtml(proximoPartido.cancha)})`;
     else if (extra) extra += ')';
 
     mensaje += `📅 <b>Próximo Partido Programado:</b>\n`;
-    mensaje += `  ${teamObj.name} 🆚 <b>${proximoPartido.rivalName}</b> el ${proximoPartido.fecha}${extra}\n`;
+    mensaje += `  ${escapeHtml(teamObj.name)} 🆚 <b>${escapeHtml(proximoPartido.rivalName)}</b> el ${escapeHtml(proximoPartido.fecha)}${extra}\n`;
   } else {
     mensaje += `📅 <b>Próximo Partido:</b> No hay partidos agendados.\n`;
   }
 
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
-    chat_id: chatId,
-    text: mensaje,
-    parse_mode: 'HTML'
-  });
+  await sendTelegramMessage(chatId, mensaje, { parse_mode: 'HTML' });
 }
