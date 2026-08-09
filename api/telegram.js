@@ -31,9 +31,17 @@ module.exports = async (req, res) => {
       const chatId = callback.message.chat.id;
       const data = callback.data;
 
-      if (data.startsWith('tabla_')) {
+      // Nivel seleccionado (ej: "nivel_primaria")
+      if (data.startsWith('nivel_')) {
         const nivel = data.split('_')[1];
-        await responderTablaLiga(chatId, nivel);
+        await enviarMenuCategorias(chatId, nivel);
+      }
+      // Liga/Categoría seleccionada (ej: "verliga_primaria_IDLIGA")
+      else if (data.startsWith('verliga_')) {
+        const parts = data.split('_'); // ['verliga', nivel, leagueId...]
+        const nivel = parts[1];
+        const leagueId = parts.slice(2).join('_');
+        await responderTablaEspecifica(chatId, nivel, leagueId);
       }
 
       return res.status(200).send('OK');
@@ -47,11 +55,11 @@ module.exports = async (req, res) => {
       if (text === '/tabla' || text === 'tabla' || text === '/start') {
         await enviarMenuLigas(chatId);
       } else if (text === '/primaria' || text === 'primaria') {
-        await responderTablaLiga(chatId, 'primaria');
+        await enviarMenuCategorias(chatId, 'primaria');
       } else if (text === '/secundaria' || text === 'secundaria') {
-        await responderTablaLiga(chatId, 'secundaria');
+        await enviarMenuCategorias(chatId, 'secundaria');
       } else if (text === '/prepa' || text === 'prepa') {
-        await responderTablaLiga(chatId, 'prepa');
+        await enviarMenuCategorias(chatId, 'prepa');
       } else {
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
@@ -67,122 +75,184 @@ module.exports = async (req, res) => {
   }
 };
 
+// Menú Nivel 1: Seleccionar Nivel (Primaria, Secundaria, Prepa)
 async function enviarMenuLigas(chatId) {
   await axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
-    text: '<b>🏆 SELECCIONA LA LIGA A CONSULTAR:</b>',
+    text: '<b>🏆 SELECCIONA EL NIVEL A CONSULTAR:</b>',
     parse_mode: 'HTML',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '🏫 Primaria', callback_data: 'tabla_primaria' }],
-        [{ text: '🏫 Secundaria', callback_data: 'tabla_secundaria' }],
-        [{ text: '🏫 Prepa', callback_data: 'tabla_prepa' }]
+        [{ text: '🏫 Primaria', callback_data: 'nivel_primaria' }],
+        [{ text: '🏫 Secundaria', callback_data: 'nivel_secundaria' }],
+        [{ text: '🏫 Prepa', callback_data: 'nivel_prepa' }]
       ]
     }
   });
 }
 
-async function responderTablaLiga(chatId, nivel) {
+// Menú Nivel 2: Seleccionar Liga / Categoría específica para ese nivel
+async function enviarMenuCategorias(chatId, nivel) {
   const configLiga = LIGAS[nivel];
   if (!configLiga) {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
-      text: '⚠️ Liga no encontrada.'
+      text: '⚠️ Nivel no encontrado.'
     });
     return;
   }
 
-  let listaEquipos = [];
-  let ligaEncontrada = false;
-  const subcoleccionesPosibles = ['teams', 'equipos', 'standings', 'posiciones'];
+  let listaCategorias = [];
 
   for (const docId of configLiga.ids) {
-    // 1. Probar subcolecciones dentro de artifacts -> docId -> public -> data -> [subcol]
-    for (const subcol of subcoleccionesPosibles) {
-      const snap = await db.collection('artifacts')
-        .doc(docId)
-        .collection('public')
-        .doc('data')
-        .collection(subcol)
-        .get();
-
-      if (!snap.empty) {
-        ligaEncontrada = true;
-        snap.forEach(doc => {
-          const d = doc.data();
-          listaEquipos.push({
-            equipo: d.nombre || d.equipo || d.name || d.team || d.teamName || doc.id,
-            puntos: d.puntos ?? d.pts ?? d.points ?? d.score ?? 0
-          });
-        });
-        break;
-      }
-    }
-
-    if (ligaEncontrada) break;
-
-    // 2. Probar subcolecciones directamente en artifacts -> docId -> [subcol]
-    for (const subcol of subcoleccionesPosibles) {
-      const snap = await db.collection('artifacts')
-        .doc(docId)
-        .collection(subcol)
-        .get();
-
-      if (!snap.empty) {
-        ligaEncontrada = true;
-        snap.forEach(doc => {
-          const d = doc.data();
-          listaEquipos.push({
-            equipo: d.nombre || d.equipo || d.name || d.team || d.teamName || doc.id,
-            puntos: d.puntos ?? d.pts ?? d.points ?? d.score ?? 0
-          });
-        });
-        break;
-      }
-    }
-
-    if (ligaEncontrada) break;
-
-    // 3. Probar documento en artifacts -> docId -> public -> data
-    const dataDocSnap = await db.collection('artifacts')
+    // Buscar en subcolección 'leagues'
+    const leaguesSnap = await db.collection('artifacts')
       .doc(docId)
       .collection('public')
       .doc('data')
+      .collection('leagues')
       .get();
 
-    if (dataDocSnap.exists) {
-      const datos = dataDocSnap.data();
-      const equipos = datos.tabla || datos.equipos || datos.teams || datos.standings || [];
-      if (Array.isArray(equipos) && equipos.length > 0) {
-        ligaEncontrada = true;
-        listaEquipos = equipos.map(item => ({
-          equipo: item.equipo || item.nombre || item.name || item.team || 'Equipo',
-          puntos: item.puntos ?? item.pts ?? item.points ?? item.score ?? 0
-        }));
-        break;
-      }
+    if (!leaguesSnap.empty) {
+      leaguesSnap.forEach(doc => {
+        const d = doc.data();
+        listaCategorias.push({
+          id: doc.id,
+          nombre: d.nombre || d.name || d.title || d.liga || doc.id,
+          deporte: d.deporte || d.sport || ''
+        });
+      });
+      break;
     }
 
-    // 4. Probar documento directo en artifacts -> docId
-    const rootDocSnap = await db.collection('artifacts').doc(docId).get();
-    if (rootDocSnap.exists) {
-      const datos = rootDocSnap.data();
-      const equipos = datos.tabla || datos.equipos || datos.teams || datos.standings || [];
-      if (Array.isArray(equipos) && equipos.length > 0) {
-        ligaEncontrada = true;
-        listaEquipos = equipos.map(item => ({
-          equipo: item.equipo || item.nombre || item.name || item.team || 'Equipo',
-          puntos: item.puntos ?? item.pts ?? item.points ?? item.score ?? 0
-        }));
-        break;
-      }
+    // Buscar en subcolección 'tournaments'
+    const tournamentsSnap = await db.collection('artifacts')
+      .doc(docId)
+      .collection('public')
+      .doc('data')
+      .collection('tournaments')
+      .get();
+
+    if (!tournamentsSnap.empty) {
+      tournamentsSnap.forEach(doc => {
+        const d = doc.data();
+        listaCategorias.push({
+          id: doc.id,
+          nombre: d.nombre || d.name || d.title || doc.id,
+          deporte: d.deporte || d.sport || ''
+        });
+      });
+      break;
     }
   }
 
-  if (!ligaEncontrada || listaEquipos.length === 0) {
+  if (listaCategorias.length === 0) {
     await axios.post(`${TELEGRAM_API}/sendMessage`, {
       chat_id: chatId,
-      text: `⚠️ No se encontraron datos guardados para ${configLiga.nombre}.`
+      text: `⚠️ No se encontraron categorías disponibles para ${configLiga.nombre}.`
+    });
+    return;
+  }
+
+  // Generar botones interactivos (máximo 2 por fila para mejor visualización)
+  const inline_keyboard = [];
+  for (let i = 0; i < listaCategorias.length; i += 2) {
+    const row = [];
+    const cat1 = listaCategorias[i];
+    const icon1 = cat1.deporte ? '🏆' : '🏆';
+    row.push({ text: `${icon1} ${cat1.nombre}`, callback_data: `verliga_${nivel}_${cat1.id}` });
+
+    if (i + 1 < listaCategorias.length) {
+      const cat2 = listaCategorias[i + 1];
+      const icon2 = cat2.deporte ? '🏆' : '🏆';
+      row.push({ text: `${icon2} ${cat2.nombre}`, callback_data: `verliga_${nivel}_${cat2.id}` });
+    }
+    inline_keyboard.push(row);
+  }
+
+  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+    chat_id: chatId,
+    text: `<b>📋 CATEGORÍAS / LIGAS DISPONIBLES - ${configLiga.nombre}:</b>\nSelecciona la liga que deseas consultar:`,
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard }
+  });
+}
+
+// Responde con la tabla de clasificación de una Liga/Categoría específica
+async function responderTablaEspecifica(chatId, nivel, leagueId) {
+  const configLiga = LIGAS[nivel];
+  if (!configLiga) return;
+
+  let listaEquipos = [];
+  let nombreLiga = 'LIGA';
+
+  for (const docId of configLiga.ids) {
+    // 1. Intentar obtener el nombre de la liga
+    const leagueDoc = await db.collection('artifacts')
+      .doc(docId)
+      .collection('public')
+      .doc('data')
+      .collection('leagues')
+      .doc(leagueId)
+      .get();
+
+    if (leagueDoc.exists) {
+      const ld = leagueDoc.data();
+      nombreLiga = ld.nombre || ld.name || ld.title || leagueId;
+    }
+
+    // 2. Obtener los equipos de esa liga
+    const teamsSnap = await db.collection('artifacts')
+      .doc(docId)
+      .collection('public')
+      .doc('data')
+      .collection('teams')
+      .get();
+
+    if (!teamsSnap.empty) {
+      teamsSnap.forEach(doc => {
+        const d = doc.data();
+        // Filtrar equipos que pertenecen a esta liga específica
+        const coincideLiga = (
+          d.leagueId === leagueId ||
+          d.ligaId === leagueId ||
+          d.tournamentId === leagueId ||
+          d.categoriaId === leagueId ||
+          d.league === leagueId
+        );
+
+        if (coincideLiga) {
+          listaEquipos.push({
+            equipo: d.nombre || d.equipo || d.name || d.team || doc.id,
+            puntos: d.puntos ?? d.pts ?? d.points ?? d.score ?? 0,
+            pj: d.pj ?? d.jugados ?? d.played ?? 0,
+            pg: d.pg ?? d.ganados ?? d.won ?? 0,
+            pe: d.pe ?? d.empatados ?? d.drawn ?? 0,
+            pp: d.pp ?? d.perdidos ?? d.lost ?? 0
+          });
+        }
+      });
+
+      // Si no hubo filtro exacto pero existen equipos en la subcolección, los tomamos todos si solo hay 1 liga
+      if (listaEquipos.length === 0 && teamsSnap.size > 0) {
+        teamsSnap.forEach(doc => {
+          const d = doc.data();
+          listaEquipos.push({
+            equipo: d.nombre || d.equipo || d.name || d.team || doc.id,
+            puntos: d.puntos ?? d.pts ?? d.points ?? d.score ?? 0
+          });
+        });
+      }
+
+      if (listaEquipos.length > 0) break;
+    }
+  }
+
+  if (listaEquipos.length === 0) {
+    await axios.post(`${TELEGRAM_API}/sendMessage`, {
+      chat_id: chatId,
+      text: `⚠️ No se encontraron equipos registrados para la categoría <b>${nombreLiga}</b>.`,
+      parse_mode: 'HTML'
     });
     return;
   }
@@ -191,6 +261,7 @@ async function responderTablaLiga(chatId, nivel) {
   listaEquipos.sort((a, b) => (b.puntos || 0) - (a.puntos || 0));
 
   let mensaje = `<b>🏆 CLASIFICACIÓN - ${configLiga.nombre}</b>\n`;
+  mensaje += `📌 <b>Categoría:</b> ${nombreLiga}\n\n`;
   mensaje += '<pre>';
   mensaje += 'Pos Equipo       Pts\n';
   mensaje += '--------------------\n';
